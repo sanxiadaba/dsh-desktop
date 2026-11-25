@@ -500,6 +500,28 @@ impl Uia {
         }
     }
 
+    /// 元素当前是否被选中（列表项、页签、单选）。拿不到就返回 None。
+    pub fn is_selected(&self, el: &IUIAutomationElement) -> Option<bool> {
+        unsafe {
+            let p = el
+                .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                    UIA_SelectionItemPatternId,
+                )
+                .ok()?;
+            p.CurrentIsSelected().ok().map(|b| b.as_bool())
+        }
+    }
+
+    /// 元素当前是否被切换（勾选框）。拿不到就返回 None。
+    pub fn is_toggled(&self, el: &IUIAutomationElement) -> Option<bool> {
+        unsafe {
+            let p = el
+                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                .ok()?;
+            p.CurrentToggleState().ok().map(|s| s.0 == 1)
+        }
+    }
+
     pub fn invoke(&self, el: &IUIAutomationElement) -> Result<()> {
         unsafe {
             let p = el

@@ -98,6 +98,85 @@ where
     input::with_foreground_guard(f)
 }
 
+/// 调用 Invoke 并用选中状态回读确认。
+/// 列表项/页签这类元素有的程序把 Invoke 实现成空操作（PowerWriter 的芯片列表就是），
+/// 回读发现没选中就退回后台点击，避免"返回 ok 但界面没动"。
+fn invoke_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
+    let selectable = matches!(
+        r.node.role.as_str(),
+        "listitem" | "tabitem" | "radio" | "dataitem" | "treeitem" | "menuitem"
+    );
+    let before = uia.is_selected(&r.element);
+    let (res, mut stolen) = guarded(|| uia.invoke(&r.element));
+    res?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let after = uia.is_selected(&r.element);
+    if !selectable || after == Some(true) || (before == Some(true) && after == before) {
+        return Ok(("semantic:invoke".to_string(), stolen));
+    }
+
+    let (x, y) = center(&r.node);
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    ensure_inside(hwnd, x, y)?;
+    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
+    res2?;
+    stolen |= stolen2;
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let after2 = uia.is_selected(&r.element);
+    if after2 == Some(true) {
+        Ok(("bg:invoke-fallback".to_string(), stolen))
+    } else {
+        Ok(("bg:invoke-unverified".to_string(), stolen))
+    }
+}
+
+/// 选中并用状态回读确认：有些程序实现了 SelectionItemPattern 却不理它
+/// （PowerWriter 的芯片列表就是），回读发现没变就退回后台点击。
+fn select_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
+    let before = uia.is_selected(&r.element);
+    let (res, mut stolen) = guarded(|| uia.select(&r.element));
+    res?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let after = uia.is_selected(&r.element);
+    if after == Some(true) || before == Some(true) {
+        return Ok(("semantic:select".to_string(), stolen));
+    }
+
+    let (x, y) = center(&r.node);
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    ensure_inside(hwnd, x, y)?;
+    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
+    res2?;
+    stolen |= stolen2;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let after2 = uia.is_selected(&r.element);
+    if after2 == Some(true) {
+        Ok(("bg:select-fallback".to_string(), stolen))
+    } else {
+        Ok(("bg:select-unverified".to_string(), stolen))
+    }
+}
+
+/// 切换勾选框并回读确认，没变就退回后台点击。
+fn toggle_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
+    let before = uia.is_toggled(&r.element);
+    let (res, mut stolen) = guarded(|| uia.toggle(&r.element));
+    res?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let after = uia.is_toggled(&r.element);
+    if after != before {
+        return Ok(("semantic:toggle".to_string(), stolen));
+    }
+
+    let (x, y) = center(&r.node);
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    ensure_inside(hwnd, x, y)?;
+    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
+    res2?;
+    stolen |= stolen2;
+    Ok(("bg:toggle-fallback".to_string(), stolen))
+}
+
 fn center(node: &Node) -> (i32, i32) {
     (
         node.rect.x + node.rect.width / 2,
@@ -124,17 +203,23 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
 
     let force_bg = matches!(mode, Some(Mode::Background));
     if !force_bg {
-        let semantic = if has("click") {
-            Some(("semantic:invoke", guarded(|| uia.invoke(&r.element))))
-        } else if has("select") {
-            Some(("semantic:select", guarded(|| uia.select(&r.element))))
-        } else if has("toggle") {
-            Some(("semantic:toggle", guarded(|| uia.toggle(&r.element))))
-        } else {
-            None
-        };
-        if let Some((mode_name, (res, stolen))) = semantic {
-            res?;
+        if has("click") {
+            let (mode_name, stolen) = invoke_verified(uia, &r)?;
+            let mut out = json!({
+                "ref": ref_id, "mode": mode_name, "actions": tried,
+                "element": {"role": r.node.role, "name": r.node.name},
+            });
+            if stolen {
+                out["focus_restored"] = json!(true);
+            }
+            return Ok(out);
+        }
+        if has("select") || has("toggle") {
+            let (mode_name, stolen) = if has("select") {
+                select_verified(uia, &r)?
+            } else {
+                toggle_verified(uia, &r)?
+            };
             let mut out = json!({
                 "ref": ref_id, "mode": mode_name, "actions": tried,
                 "element": {"role": r.node.role, "name": r.node.name},
@@ -229,9 +314,8 @@ pub fn set_focus(uia: &Uia, ref_id: &str) -> Result<Value> {
 
 pub fn select(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (res, stolen) = guarded(|| uia.select(&r.element));
-    res?;
-    let mut out = json!({"ref": ref_id, "mode": "semantic:select",
+    let (mode_name, stolen) = select_verified(uia, &r)?;
+    let mut out = json!({"ref": ref_id, "mode": mode_name,
         "element": {"role": r.node.role, "name": r.node.name}});
     if stolen {
         out["focus_restored"] = json!(true);
@@ -241,9 +325,8 @@ pub fn select(uia: &Uia, ref_id: &str) -> Result<Value> {
 
 pub fn toggle(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (res, stolen) = guarded(|| uia.toggle(&r.element));
-    res?;
-    let mut out = json!({"ref": ref_id, "mode": "semantic:toggle",
+    let (mode_name, stolen) = toggle_verified(uia, &r)?;
+    let mut out = json!({"ref": ref_id, "mode": mode_name,
         "element": {"role": r.node.role, "name": r.node.name}});
     if stolen {
         out["focus_restored"] = json!(true);

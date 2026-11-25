@@ -68,6 +68,10 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 | `expand` | `expand` / `collapse`（菜单、树节点、下拉框） |
 | `scrollitem` | `scrollitem`（把滚出视口的元素滚回来） |
 
+动作返回里的 `mode` 告诉你实际走了哪条路：`semantic:*` 是 UIA 动作，`bg:*` 是后台注入。
+`select`/`toggle` 和列表项的 `click` 会回读状态，程序收了却没反应时自动退回后台点击
+（`mode` 会是 `bg:select-fallback` / `bg:invoke-fallback`），所以不会出现"返回 ok 但界面没动"。
+
 没有可用 actions 的元素也照样能点：`click` 会自动退回**后台消息注入**（不动物理光标）。
 需要强制走注入就加 `--mode bg`。
 

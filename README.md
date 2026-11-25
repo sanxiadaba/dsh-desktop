@@ -34,6 +34,8 @@ Qt 程序（比如 PowerWriter、Notepad--）、Win32 自绘界面上，这一�
 - **元素身份 = 路径 +（角色、名字、automation_id、矩形）**，所以窗口里有两个「打开」按钮也能精确定位，
   不会像只看名字的工具那样一律拒绝。
 - **属性走 UIA CacheRequest**，一个元素一次跨进程调用。Qt 窗口 130 个元素约 30 ms。
+- **语义动作会回读验证**：`select`/`toggle` 读完状态、列表项的 `invoke` 读选中态；
+  程序收了没反应就自动退回后台点击，结果里的 `mode` 会写成 `semantic:*` 或 `bg:*-fallback`。
 - **后台点击会做客户区边界检查**：元素滚出视口时直接报 `POINT_OUTSIDE`，不会静默点空。
 - **键盘消息发给真正有焦点的子控件**（线程 `hwndFocus` → 可聚焦的 edit/document → 顶层窗口），
   否则 Win32 程序收不到。
