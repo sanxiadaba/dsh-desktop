@@ -156,6 +156,7 @@ pub fn double_click_client(hwnd: HWND, cx: i32, cy: i32) -> Result<()> {
 }
 
 /// 把剪贴板内容粘贴到目标窗口：优先 WM_PASTE，不行再发 Ctrl+V。
+/// 中文优先用 WM_CHAR（`type` 默认路径），它绕过输入法；这条只在目标不认 WM_CHAR 时用。
 pub fn paste(hwnd: HWND) -> Result<()> {
     const WM_PASTE: u32 = 0x0302;
     if send(hwnd, WM_PASTE, 0, LPARAM(0)) {
@@ -163,7 +164,6 @@ pub fn paste(hwnd: HWND) -> Result<()> {
     }
     key_combo(hwnd, "ctrl+v")
 }
-
 /// 逐字符投递 WM_CHAR。ASCII 和大部分 BMP 字符可用；中文输入法文本建议走粘贴。
 pub fn type_text(hwnd: HWND, text: &str) -> Result<()> {
     for ch in text.encode_utf16() {

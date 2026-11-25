@@ -19,8 +19,7 @@ impl Args {
 
     /// 取选项值：支持 `--opt value` 与 `--opt=value`。
     pub fn opt(&self, name: &str) -> Option<String> {
-        let it = self.raw.iter().enumerate();
-        for (i, a) in it {
+        for (i, a) in self.raw.iter().enumerate() {
             if a == name {
                 return self.raw.get(i + 1).cloned();
             }
@@ -38,7 +37,6 @@ impl Args {
         while i < self.raw.len() {
             let a = &self.raw[i];
             if a.starts_with("--") {
-                // `--opt value` 形式：吃掉值；`--opt=value` 自成一体。
                 if !a.contains('=')
                     && let Some(next) = self.raw.get(i + 1)
                     && !next.starts_with('-')
@@ -90,6 +88,7 @@ fn takes_value(flag: &str) -> bool {
         flag,
         "--window"
             | "--depth"
+            | "--limit"
             | "--out"
             | "--screen"
             | "--mode"
@@ -98,78 +97,83 @@ fn takes_value(flag: &str) -> bool {
             | "--timeout-ms"
             | "--amount"
             | "--delta"
-            | "--steps"
-            | "--sel"
-            | "--value"
             | "--method"
-            | "--role"
             | "--name"
             | "--text"
-            | "--index"
+            | "--element"
+            | "--sel"
             | "--title"
             | "--exe"
-            | "--pid"
-            | "--file"
-            | "--kind"
-            | "--iters"
-            | "--seconds"
-            | "--ms"
-            | "--from"
-            | "--to"
+            | "--dir"
     )
 }
 
-pub const HELP_MAIN: &str = r#"desk — 桌面控制工具（观察 / 语义动作 / 后台注入 / 物理兜底）
+pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义动作 / 后台注入 / 物理兜底）
 
-用法：desk <命令> [选项]
+默认不抢前台、不动光标：语义动作走不通时自动改为向目标窗口投递鼠标键盘消息。
 
 观察
-  windows  [--all]                     列出窗口（默认只要标题非空的）
-  status                               环境与前台窗口
-  snap     [--window <id>] [--depth N] [--all]
-                                       读 UIA 树，输出带 @ref 的元素（默认前台窗口）
-  find     <role:Name> [--window <id>] 在树里找元素
-  shot     [--window <id>] [--out P]   截图成 PNG（默认前台窗口；--screen 截整屏）
+  windows  [--all]                      列出窗口（默认只要标题非空、非本进程的）
+  status                                环境、完整性级别、前台窗口
+  snap     [--window <id>] [--depth N] [--limit N] [--raw]
+           [--actionable] [--name 文本]  读 UIA 树，输出带 @ref 的元素；默认前台窗口
+  find     <role:名字> [--window <id>]   在树里找元素（等于 snap + 过滤）
+  info     <@ref>                        单个元素的完整信息（含 native_hwnd）
+  shot     [--window <id>] [--out 路径] [--screen]
+                                         截图 PNG；窗口被遮挡也能拍
 
-动作（默认先语义、失败再后台注入，绝不抢前台）
+动作（不加 --mode physical 就不会移动真实光标）
   click    <@ref> [--mode semantic|bg|physical] [--verify]
-  select   <@ref>
-  toggle   <@ref>
-  set      <@ref> <value>
-  expand   <@ref>       collapse <@ref>
-  scroll   <@ref> <amount>            或 --window <id> --xy X,Y
-  key      <组合键> [--window <id>] [--mode bg|physical]
-  type     <文本> [--ref <@ref>] [--window <id>] [--method value|keys|paste]
-  drag     <x1,y1> <x2,y2> [--window <id>]
-  paste    [--window <id>]            把剪贴板内容粘贴到目标
+  rclick   <@ref>                        右键
+  dclick   <@ref>                        双击
+  select   <@ref>                        选中（页签、列表项、单选）
+  toggle   <@ref>                        切换勾选状态
+  set      <@ref> <值>                   直接写值（ValuePattern）
+  expand   <@ref> / collapse <@ref>      展开 / 折叠（菜单、树节点、下拉框）
+  scrollitem <@ref> / setfocus <@ref>    滚进视野 / 把键盘焦点给它
+  scroll   <@ref> <增量>                 或 --window <id> --xy X,Y
+  wheel    --window <id> [--delta -120] [--xy X,Y]
+  drag     "x1,y1" "x2,y2" [--window <id>]
+  key      <组合键> [--window <id>|--ref <@ref>] [--mode bg|physical]
+  type     <文本> [--window <id>|--ref <@ref>] [--method auto|value|keys|paste|physical]
 
 窗口
-  focus|minimize|maximize|restore|close <id>
-  move <id> <x> <y> | resize <id> <w> <h>
-  launch <exe 或路径> [参数...]
+  launch   <exe 或路径> [--dir 目录]
+  focus | minimize | maximize | restore | close  <窗口 id>
+  move     <窗口 id> <x> <y>
+  resize   <窗口 id> <宽> <高>
 
 其它
-  clipboard get|set <文本>
-  wait     --window <id> [--text T] [--timeout-ms N]
-  run      -                          从 stdin 读 JSON 步骤批量执行
-  selftest                            自测：不需要任何 GUI
-  help [命令]                         本帮助
+  clipboard get | set <文本>
+  wait     --title <文本> [--exe <名>] [--timeout-ms N]
+  wait     --window <id> [--text <文本> | --element <role:名字>] [--timeout-ms N]
+  run      -                             从 stdin 读 {"steps":[["click","@s1:e3"], ...]}
+  selftest [--physical]                  自测：自己开窗验证注入（--physical 会动光标）
+  help [命令]                            本帮助
 
-通用选项
-  --json    紧凑输出（默认就是 JSON）
-  --quiet   只输出结果路径/值
+ref 形如 @s1a2b:e3，由 snap 生成；界面一变就重新 snap。
+错误输出里 retry=safe 才能重试；unsafe 表示动作可能已经生效，先读状态再决定。
 "#;
 
 pub fn help_for(cmd: &str) -> &'static str {
     match cmd {
         "snap" => {
-            "desk snap [--window <id>] [--depth N] [--all]\n读 UIA 树。每个可操作元素带 @ref，供后续 click/select/set 使用。"
+            "desk snap [--window <id>] [--depth N] [--limit N] [--raw] [--actionable] [--name 文本]\n读 UIA 树。每个元素带 @ref、role、name、actions、rect、depth。\n--actionable 只留能动的元素；--raw 用 RawView（含不可见脚手架）。"
         }
         "click" => {
-            "desk click <@ref> [--mode semantic|bg|physical] [--verify]\nsemantic=UIA 模式（不动鼠标）；bg=投递窗口消息（不动光标、不抢前台）；physical=SendInput（会动你的鼠标，明确选择才用）。"
+            "desk click <@ref> [--mode semantic|bg|physical] [--verify]\nsemantic=UIA 模式（不动鼠标）；bg=投递窗口消息（不动光标、不抢前台）；physical=SendInput（会动你的鼠标，必须明确指定）。\n--verify 会在动作后重新读一次界面并回报元素状态。"
         }
         "type" => {
-            "desk type <文本> [--ref <@ref>] [--window <id>] [--method value|keys|paste]\nvalue=UIA ValuePattern；keys=WM_CHAR 逐字投递；paste=剪贴板+粘贴（中文用这个）。"
+            "desk type <文本> [--window <id>|--ref <@ref>] [--method auto|value|keys|paste|physical]\nauto/keys=逐字 WM_CHAR（ASCII 和中文都行，绕过输入法）；value=UIA ValuePattern 直接写值；paste=剪贴板+粘贴；physical=SendInput。"
+        }
+        "key" => {
+            "desk key <组合键> [--window <id>|--ref <@ref>] [--mode bg|physical]\n组合键写法：ctrl+s、alt+F4、shift+tab、enter、f5。默认发给目标窗口里有焦点的子控件。"
+        }
+        "run" => {
+            "desk run -\n从 stdin 读 {\"steps\":[[\"click\",\"@s1:e3\"],[\"type\",\"hi\",\"--window\",\"w-1\"]]}，一个进程里连续执行。"
+        }
+        "selftest" => {
+            "desk selftest [--physical]\n不依赖外部程序：自己建一个不抢前台的窗口，验证鼠标/键盘/滚轮注入、窗口枚举和截图。--physical 额外验证 SendInput（会动光标）。"
         }
         _ => HELP_MAIN,
     }

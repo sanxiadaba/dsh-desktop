@@ -11,10 +11,10 @@ use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, WS_EX_NOACTIVATE, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetMessageW, MSG, PostMessageW, RegisterClassW, TranslateMessage, WM_CHAR, WM_CLOSE,
     WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 struct Counters {

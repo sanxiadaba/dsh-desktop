@@ -37,7 +37,7 @@ Qt 程序（比如 PowerWriter、Notepad--）、Win32 自绘界面上，这一�
 - **后台点击会做客户区边界检查**：元素滚出视口时直接报 `POINT_OUTSIDE`，不会静默点空。
 - **键盘消息发给真正有焦点的子控件**（线程 `hwndFocus` → 可聚焦的 edit/document → 顶层窗口），
   否则 Win32 程序收不到。
-- **中文输入**走剪贴板 + 粘贴（`--method paste`），WM_CHAR 只适合 ASCII。
+- **文本输入**逐字投 `WM_CHAR`，ASCII 和中文都走这条路（绕过输入法）；`--method paste` 只在目标不认 `WM_CHAR` 时用。
 
 ## 安装
 

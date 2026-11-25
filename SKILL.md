@@ -88,9 +88,9 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 ```powershell
 & $desk key  "ctrl+s" --window w-306bc
 & $desk key  "enter"  --ref '@s1:e7'
-& $desk type "hello"  --window w-306bc             # ASCII，逐字 WM_CHAR
-& $desk type "中文内容" --window w-306bc --method paste  # 中文走剪贴板粘贴
-& $desk type "hello"  --ref '@s1:e4' --method value      # 直接写值，最稳
+& $desk type "hello 中文" --window w-306bc        # 逐字 WM_CHAR，ASCII 和中文都行
+& $desk type "中文" --window w-306bc --method value --ref '@s1:e4'   # 直接写值，最稳
+& $desk type "中文" --window w-306bc --method paste  # 只在目标不认 WM_CHAR 时用
 ```
 
 鼠标：`scroll`、`wheel`、`drag`、`rclick`、`dclick` 都是后台注入，
