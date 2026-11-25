@@ -59,6 +59,26 @@ fn roles_map_to_stable_tokens() {
 }
 
 #[test]
+fn integrity_levels_map_to_names() {
+    assert_eq!(crate::win::integrity_name(0x0000), "untrusted");
+    assert_eq!(crate::win::integrity_name(0x1000), "low");
+    assert_eq!(crate::win::integrity_name(0x2000), "medium");
+    assert_eq!(crate::win::integrity_name(0x2100), "medium");
+    assert_eq!(crate::win::integrity_name(0x3000), "high");
+    assert_eq!(crate::win::integrity_name(0x4000), "system");
+    assert_eq!(crate::win::integrity_name(0x5000), "protected");
+}
+
+#[test]
+fn our_own_integrity_is_readable() {
+    let label = crate::win::integrity_label(std::process::id());
+    assert!(
+        label.starts_with("medium") || label.starts_with("high") || label.starts_with("system"),
+        "got {label}"
+    );
+}
+
+#[test]
 fn snapshot_ids_are_unique_and_prefixed() {
     let a = crate::store::new_id();
     std::thread::sleep(std::time::Duration::from_millis(3));
