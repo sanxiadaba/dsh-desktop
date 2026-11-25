@@ -2,21 +2,21 @@
 
 use crate::error::{DeskError, Result};
 use serde::{Deserialize, Serialize};
-use windows::core::BOOL;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindow,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WS_EX_TOOLWINDOW,
 };
+use windows::core::BOOL;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rect {
@@ -65,10 +65,8 @@ pub fn parse_window_id(id: &str) -> Result<HWND> {
         .map_err(|_| DeskError::new("BAD_WINDOW_ID", format!("窗口 id 不是十六进制：{id}")))?;
     let hwnd = HWND(v as usize as *mut _);
     if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
-        return Err(
-            DeskError::new("WINDOW_GONE", format!("窗口已不存在：{id}"))
-                .with_suggestion("重新运行 `desk windows` 取最新 id"),
-        );
+        return Err(DeskError::new("WINDOW_GONE", format!("窗口已不存在：{id}"))
+            .with_suggestion("重新运行 `desk windows` 取最新 id"));
     }
     Ok(hwnd)
 }
@@ -204,6 +202,27 @@ pub fn window_rect(hwnd: HWND) -> Rect {
             }
         }
     }
+}
+
+/// 目标窗口所在线程里真正持有键盘焦点的子控件。
+/// 后台窗口的 UIA 元素不会报 focus，但线程的 hwndFocus 一直都在，
+/// 键盘消息必须投给它，投给顶层窗口 Win32 程序收不到。
+pub fn focus_hwnd(hwnd: HWND) -> Option<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetGUIThreadInfo};
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    if tid == 0 {
+        return None;
+    }
+    let mut gi = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe { GetGUIThreadInfo(tid, &mut gi) };
+    if ok.is_err() {
+        return None;
+    }
+    let focus = gi.hwndFocus;
+    if focus.0.is_null() { None } else { Some(focus) }
 }
 
 /// 屏幕坐标 → 窗口客户区坐标。

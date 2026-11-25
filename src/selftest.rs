@@ -13,8 +13,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetMessageW, MSG, PostMessageW, RegisterClassW, TranslateMessage, WM_CHAR, WM_CLOSE,
-    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WM_QUIT,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSW,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 struct Counters {
@@ -50,7 +50,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     match msg {
         WM_LBUTTONDOWN => {
             c.lbutton_down.fetch_add(1, Ordering::SeqCst);
-            c.click_x.store((lp.0 & 0xffff) as i16 as i32, Ordering::SeqCst);
+            c.click_x
+                .store((lp.0 & 0xffff) as i16 as i32, Ordering::SeqCst);
             c.click_y
                 .store(((lp.0 >> 16) & 0xffff) as i16 as i32, Ordering::SeqCst);
         }
@@ -84,7 +85,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
-pub fn run() -> Result<Value> {
+pub fn run(physical_check: bool) -> Result<Value> {
     let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<usize, String>>();
 
     let join = std::thread::spawn(move || unsafe {
@@ -214,6 +215,37 @@ pub fn run() -> Result<Value> {
         format!("{:?}", shot.map(|i| (i.width, i.height))),
         ok_shot,
     );
+
+    // 7) 物理输入（可选）：会移动真实光标，只在 --physical 时跑。
+    if physical_check {
+        let (px, py) = win::client_to_screen(hwnd, 120, 140);
+        let ok_phys;
+        if let Err(e) = crate::physical::click(px, py) {
+            ok_phys = false;
+            check("physical_click", "ok", format!("err={e}"), false);
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            ok_phys = c.lbutton_down.load(Ordering::SeqCst) >= 2;
+            check(
+                "physical_click",
+                "second click counted",
+                format!("down={}", c.lbutton_down.load(Ordering::SeqCst)),
+                ok_phys,
+            );
+        }
+        if ok_phys {
+            let before = c.chars.lock().unwrap().len();
+            let r = crate::physical::type_text("xy");
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            let after = c.chars.lock().unwrap().len();
+            check(
+                "physical_type",
+                "+2 chars",
+                format!("before={before} after={after} err={:?}", r.err()),
+                after >= before + 2,
+            );
+        }
+    }
 
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_QUIT, WPARAM(0), LPARAM(0));

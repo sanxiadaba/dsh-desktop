@@ -10,13 +10,7 @@ pub struct Args {
 
 impl Args {
     pub fn new(raw: &[String]) -> Self {
-        Self {
-            raw: raw.to_vec(),
-        }
-    }
-
-    pub fn raw(&self) -> &[String] {
-        &self.raw
+        Self { raw: raw.to_vec() }
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -25,8 +19,8 @@ impl Args {
 
     /// 取选项值：支持 `--opt value` 与 `--opt=value`。
     pub fn opt(&self, name: &str) -> Option<String> {
-        let mut it = self.raw.iter().enumerate();
-        while let Some((i, a)) = it.next() {
+        let it = self.raw.iter().enumerate();
+        for (i, a) in it {
             if a == name {
                 return self.raw.get(i + 1).cloned();
             }
@@ -37,13 +31,6 @@ impl Args {
         None
     }
 
-    pub fn require_opt(&self, name: &str) -> Result<String> {
-        self.opt(name).ok_or_else(|| {
-            DeskError::new("BAD_ARGS", format!("缺少必需选项 {name}"))
-                .with_suggestion("运行 `desk help` 查看用法")
-        })
-    }
-
     /// 位置参数（跳过所有 `--` 开头的项及其值）。
     pub fn positionals(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -52,13 +39,13 @@ impl Args {
             let a = &self.raw[i];
             if a.starts_with("--") {
                 // `--opt value` 形式：吃掉值；`--opt=value` 自成一体。
-                if !a.contains('=') {
-                    if let Some(next) = self.raw.get(i + 1) {
-                        if !next.starts_with('-') && takes_value(a) {
-                            i += 2;
-                            continue;
-                        }
-                    }
+                if !a.contains('=')
+                    && let Some(next) = self.raw.get(i + 1)
+                    && !next.starts_with('-')
+                    && takes_value(a)
+                {
+                    i += 2;
+                    continue;
                 }
                 i += 1;
                 continue;
@@ -77,17 +64,6 @@ impl Args {
                 .map(Some)
                 .map_err(|_| DeskError::new("BAD_ARGS", format!("{name} 需要一个整数，收到：{v}"))),
         }
-    }
-
-    pub fn one_of(&self, name: &str, allowed: &[&str], default: &str) -> Result<String> {
-        let v = self.opt(name).unwrap_or_else(|| default.to_string());
-        if !allowed.contains(&v.as_str()) {
-            return Err(DeskError::new(
-                "BAD_ARGS",
-                format!("{name} 只能是 {}，收到：{v}", allowed.join(" / ")),
-            ));
-        }
-        Ok(v)
     }
 
     /// 拒绝未知的 `--` 选项，避免拼错被静默忽略。
@@ -186,9 +162,15 @@ pub const HELP_MAIN: &str = r#"desk — 桌面控制工具（观察 / 语义动�
 
 pub fn help_for(cmd: &str) -> &'static str {
     match cmd {
-        "snap" => "desk snap [--window <id>] [--depth N] [--all]\n读 UIA 树。每个可操作元素带 @ref，供后续 click/select/set 使用。",
-        "click" => "desk click <@ref> [--mode semantic|bg|physical] [--verify]\nsemantic=UIA 模式（不动鼠标）；bg=投递窗口消息（不动光标、不抢前台）；physical=SendInput（会动你的鼠标，明确选择才用）。",
-        "type" => "desk type <文本> [--ref <@ref>] [--window <id>] [--method value|keys|paste]\nvalue=UIA ValuePattern；keys=WM_CHAR 逐字投递；paste=剪贴板+粘贴（中文用这个）。",
+        "snap" => {
+            "desk snap [--window <id>] [--depth N] [--all]\n读 UIA 树。每个可操作元素带 @ref，供后续 click/select/set 使用。"
+        }
+        "click" => {
+            "desk click <@ref> [--mode semantic|bg|physical] [--verify]\nsemantic=UIA 模式（不动鼠标）；bg=投递窗口消息（不动光标、不抢前台）；physical=SendInput（会动你的鼠标，明确选择才用）。"
+        }
+        "type" => {
+            "desk type <文本> [--ref <@ref>] [--window <id>] [--method value|keys|paste]\nvalue=UIA ValuePattern；keys=WM_CHAR 逐字投递；paste=剪贴板+粘贴（中文用这个）。"
+        }
         _ => HELP_MAIN,
     }
 }

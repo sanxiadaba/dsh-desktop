@@ -63,8 +63,3 @@ impl std::fmt::Display for DeskError {
 impl std::error::Error for DeskError {}
 
 pub type Result<T> = std::result::Result<T, DeskError>;
-
-pub fn last_os_error(code: &'static str, what: &str) -> DeskError {
-    let e = std::io::Error::last_os_error();
-    DeskError::new(code, format!("{what}失败：{e}"))
-}

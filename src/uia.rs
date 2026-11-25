@@ -22,9 +22,9 @@ use windows::Win32::UI::Accessibility::{
     UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
     UIA_ExpandCollapsePatternId, UIA_HasKeyboardFocusPropertyId, UIA_InvokePatternId,
     UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId,
-    UIA_LegacyIAccessiblePatternId, UIA_NamePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
-    UIA_ValuePatternId, UIA_ValueValuePropertyId,
+    UIA_LegacyIAccessiblePatternId, UIA_NamePropertyId, UIA_ScrollItemPatternId,
+    UIA_ScrollPatternId, UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId,
+    UIA_TogglePatternId, UIA_ValuePatternId, UIA_ValueValuePropertyId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,10 @@ pub struct Node {
     pub actions: Vec<String>,
     #[serde(default)]
     pub value: Option<String>,
+    #[serde(default)]
+    pub checked: Option<bool>,
+    #[serde(default)]
+    pub selected: Option<bool>,
     pub enabled: bool,
     pub offscreen: bool,
     pub focused: bool,
@@ -200,8 +204,11 @@ impl Uia {
     }
 
     pub fn element_from_handle(&self, hwnd: HWND) -> Result<IUIAutomationElement> {
-        unsafe { self.automation.ElementFromHandleBuildCache(hwnd, &self.cache) }
-            .map_err(|e| DeskError::new("UIA_FAILED", format!("读取窗口 UIA 根节点失败：{e}")))
+        unsafe {
+            self.automation
+                .ElementFromHandleBuildCache(hwnd, &self.cache)
+        }
+        .map_err(|e| DeskError::new("UIA_FAILED", format!("读取窗口 UIA 根节点失败：{e}")))
     }
 
     /// 整棵树的扁平快照，ref 形如 `@<sid>:eN`。
@@ -214,6 +221,8 @@ impl Uia {
         Ok(out)
     }
 
+    // 遍历要同时带 walker、路径、sid、选项和输出，参数多是刻意的。
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &self,
         walker: &IUIAutomationTreeWalker,
@@ -285,7 +294,7 @@ impl Uia {
             .map(|b| b.as_bool())
             .unwrap_or(false);
 
-        let (actions, value) = self.patterns(el);
+        let (actions, value, checked, selected) = self.patterns(el);
         Node {
             ref_id: format!("@{sid}:e{}", seq + 1),
             role: role_name(control_type).to_string(),
@@ -295,6 +304,8 @@ impl Uia {
             rect,
             actions,
             value,
+            checked,
+            selected,
             enabled,
             offscreen,
             focused,
@@ -304,9 +315,14 @@ impl Uia {
         }
     }
 
-    fn patterns(&self, el: &IUIAutomationElement) -> (Vec<String>, Option<String>) {
+    fn patterns(
+        &self,
+        el: &IUIAutomationElement,
+    ) -> (Vec<String>, Option<String>, Option<bool>, Option<bool>) {
         let mut out = Vec::new();
         let mut value = None;
+        let mut checked = None;
+        let mut selected = None;
         unsafe {
             if el
                 .GetCachedPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
@@ -314,24 +330,25 @@ impl Uia {
             {
                 out.push("click".to_string());
             }
-            if el
+            if let Ok(p) = el
                 .GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
-                .is_ok()
             {
                 out.push("select".to_string());
+                selected = p.CachedIsSelected().ok().map(|b| b.as_bool());
             }
-            if el
-                .GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                .is_ok()
+            if let Ok(p) = el.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
             {
                 out.push("toggle".to_string());
+                checked = p.CachedToggleState().ok().map(|s| s.0 == 1);
             }
             if let Ok(p) = el.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
                 out.push("set".to_string());
                 value = p.CachedValue().ok().map(|b| b.to_string());
             }
             if el
-                .GetCachedPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
+                .GetCachedPatternAs::<IUIAutomationExpandCollapsePattern>(
+                    UIA_ExpandCollapsePatternId,
+                )
                 .is_ok()
             {
                 out.push("expand".to_string());
@@ -357,7 +374,7 @@ impl Uia {
                 out.push("legacy".to_string());
             }
         }
-        (out, value)
+        (out, value, checked, selected)
     }
 
     /// 按快照路径取元素；身份对不上就返回 None（由调用方回退到 locate）。
@@ -522,6 +539,65 @@ impl Uia {
                 .map_err(|e| DeskError::new("NO_PATTERN", format!("该元素不支持 set：{e}")))?;
             p.SetValue(&windows::core::BSTR::from(value))
                 .map_err(|e| DeskError::new("ACTION_FAILED", format!("SetValue 失败：{e}")))
+        }
+    }
+
+    /// 适合接收键盘输入的子控件：优先可聚焦的 edit/document，
+    /// 找不到就返回 None（由调用方退回顶层窗口）。
+    pub fn typing_target(&self, hwnd: HWND) -> Option<HWND> {
+        let root = self.element_from_handle(hwnd).ok()?;
+        let walker = self.walker(false).ok()?;
+        let mut best: Option<HWND> = None;
+        self.find_typing(&walker, &root, 0, &mut best);
+        best
+    }
+
+    fn find_typing(
+        &self,
+        walker: &IUIAutomationTreeWalker,
+        el: &IUIAutomationElement,
+        depth: usize,
+        best: &mut Option<HWND>,
+    ) {
+        if depth > 24 || best.is_some() {
+            return;
+        }
+        let role = self.role_of(el);
+        let focusable = unsafe { el.CurrentIsKeyboardFocusable() }
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
+        if focusable
+            && (role == "edit" || role == "document")
+            && let Ok(h) = unsafe { el.CurrentNativeWindowHandle() }
+            && !h.0.is_null()
+        {
+            *best = Some(h);
+            return;
+        }
+        let mut child = unsafe { walker.GetFirstChildElement(el) };
+        while let Ok(c) = child {
+            self.find_typing(walker, &c, depth + 1, best);
+            if best.is_some() {
+                return;
+            }
+            child = unsafe { walker.GetNextSiblingElement(&c) };
+        }
+    }
+
+    pub fn scroll_into_view(&self, el: &IUIAutomationElement) -> Result<()> {
+        unsafe {
+            let p = el
+                .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
+                .map_err(|e| DeskError::new("NO_PATTERN", format!("该元素不支持滚入视野：{e}")))?;
+            p.ScrollIntoView()
+                .map_err(|e| DeskError::new("ACTION_FAILED", format!("滚入视野失败：{e}")))
+        }
+    }
+
+    pub fn set_focus(&self, el: &IUIAutomationElement) -> Result<()> {
+        unsafe {
+            el.SetFocus()
+                .map_err(|e| DeskError::new("ACTION_FAILED", format!("设置焦点失败：{e}")))
         }
     }
 

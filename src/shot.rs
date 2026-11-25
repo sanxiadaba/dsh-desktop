@@ -6,8 +6,8 @@ use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC, SRCCOPY, SelectObject,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
 pub struct Image {
     pub width: u32,
@@ -19,9 +19,8 @@ pub struct Image {
 /// 截取整个窗口（含标题栏与边框）。被遮挡也能拍；最小化的窗口通常拍不到内容。
 pub fn window(hwnd: HWND) -> Result<Image> {
     let mut rect = RECT::default();
-    unsafe { GetClientRect(hwnd, &mut rect) }.map_err(|e| {
-        DeskError::new("SHOT_FAILED", format!("读取窗口客户区失败：{e}"))
-    })?;
+    unsafe { GetClientRect(hwnd, &mut rect) }
+        .map_err(|e| DeskError::new("SHOT_FAILED", format!("读取窗口客户区失败：{e}")))?;
     let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
     if w <= 0 || h <= 0 {
         return Err(DeskError::new(
@@ -118,7 +117,7 @@ pub fn save_png(img: &Image, path: &std::path::Path) -> Result<()> {
         .write_header()
         .map_err(|e| DeskError::new("SHOT_FAILED", format!("写 PNG 头失败：{e}")))?;
     let mut rgba = Vec::with_capacity(img.bgra.len());
-    for px in img.bgra.chunks_exact(4) {
+    for px in img.bgra.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
     }
     writer
@@ -126,4 +125,3 @@ pub fn save_png(img: &Image, path: &std::path::Path) -> Result<()> {
         .map_err(|e| DeskError::new("SHOT_FAILED", format!("写 PNG 数据失败：{e}")))?;
     Ok(())
 }
-

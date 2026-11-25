@@ -7,15 +7,14 @@
 //! 把调用方一起拖死（超时返回 SMTO_ABORTIFHUNG 错误）。
 
 use crate::error::{DeskError, Result};
-use crate::win::{client_to_screen, screen_to_client};
+use crate::win::screen_to_client;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP,
+    PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
 const TIMEOUT_MS: u32 = 2000;
@@ -129,9 +128,40 @@ pub fn key_combo(hwnd: HWND, combo: &str) -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(15));
     send(hwnd, WM_KEYUP, vk as usize, LPARAM(0xC001_0001u32 as isize));
     for m in mods.iter().rev() {
-        let _ = send(hwnd, WM_KEYUP, m.0 as usize, LPARAM(0xC001_0001u32 as isize));
+        let _ = send(
+            hwnd,
+            WM_KEYUP,
+            m.0 as usize,
+            LPARAM(0xC001_0001u32 as isize),
+        );
     }
     Ok(())
+}
+
+/// 双击：系统平时靠真实输入生成 WM_LBUTTONDBLCLK，投递时得自己补上。
+pub fn double_click_client(hwnd: HWND, cx: i32, cy: i32) -> Result<()> {
+    const WM_LBUTTONDBLCLK: u32 = 0x0203;
+    let lp = lparam_xy(cx, cy);
+    let _ = send(hwnd, WM_MOUSEMOVE, 0, lp);
+    if !send(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp) {
+        return Err(DeskError::new("BG_DELIVER_FAILED", "双击：第一次按下失败").delivered());
+    }
+    let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    if !send(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lp) {
+        return Err(DeskError::new("BG_DELIVER_FAILED", "双击：DBLCLK 消息投递失败").delivered());
+    }
+    let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
+    Ok(())
+}
+
+/// 把剪贴板内容粘贴到目标窗口：优先 WM_PASTE，不行再发 Ctrl+V。
+pub fn paste(hwnd: HWND) -> Result<()> {
+    const WM_PASTE: u32 = 0x0302;
+    if send(hwnd, WM_PASTE, 0, LPARAM(0)) {
+        return Ok(());
+    }
+    key_combo(hwnd, "ctrl+v")
 }
 
 /// 逐字符投递 WM_CHAR。ASCII 和大部分 BMP 字符可用；中文输入法文本建议走粘贴。
@@ -215,9 +245,3 @@ pub fn parse_key(name: &str) -> Result<u16> {
     };
     Ok(vk)
 }
-
-/// 窗口客户区中心对应的屏幕坐标。
-pub fn client_center(hwnd: HWND, w: i32, h: i32) -> (i32, i32) {
-    client_to_screen(hwnd, w / 2, h / 2)
-}
-
