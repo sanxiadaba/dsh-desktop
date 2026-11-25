@@ -189,7 +189,7 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
   toggle   <@ref>                        切换勾选状态
   set      <@ref> <值>                   直接写值（ValuePattern）
   expand   <@ref> / collapse <@ref>      展开 / 折叠（菜单、树节点、下拉框）
-  scrollitem <@ref>                      把滚出视口的元素滚回可见区
+  scrollitem <@ref>   (别名 scrollinto)   把滚出视口的元素滚回可见区
   scroll   <@ref> <增量>                 或 --window <id> --xy X,Y
   wheel    --window <id> [--delta -120] [--xy X,Y]
   drag     "x1,y1" "x2,y2" [--window <id>]

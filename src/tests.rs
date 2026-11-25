@@ -52,13 +52,37 @@ fn roles_map_to_stable_tokens() {
 }
 
 #[test]
-fn admin_gate_allows_only_diagnostics() {
+fn admin_gate_comes_from_the_command_table() {
     for ok in ["help", "status", "elevate"] {
-        assert!(crate::is_readonly(ok), "{ok} 应该允许非管理员");
+        assert!(!crate::commands::needs_admin(ok), "{ok} 应该允许非管理员");
     }
     for deny in ["click", "type", "snap", "windows", "shot", "run"] {
-        assert!(!crate::is_readonly(deny), "{deny} 应该要求管理员");
+        assert!(crate::commands::needs_admin(deny), "{deny} 应该要求管理员");
     }
+    // 表里没有的命令按"需要管理员"处理，并会被 dispatch 拒绝
+    assert!(crate::commands::needs_admin("no-such-command"));
+}
+
+#[test]
+fn every_command_is_in_the_help_text() {
+    let help = crate::cli::HELP_MAIN;
+    for spec in crate::commands::COMMANDS {
+        if spec.name == "focus" {
+            continue; // 已禁用，帮助里不再列
+        }
+        assert!(
+            help.contains(spec.name),
+            "命令 {} 没写进 help（会让人不知道它存在）",
+            spec.name
+        );
+    }
+}
+
+#[test]
+fn unknown_command_is_rejected_by_name() {
+    let err = crate::run(&["frobnicate".to_string()]).unwrap_err();
+    assert_eq!(err.code, "BAD_ARGS");
+    assert!(err.message.contains("未知子命令"), "{}", err.message);
 }
 
 #[test]
@@ -176,4 +200,19 @@ fn snapshot_ids_must_be_safe() {
     assert!(!crate::store::is_valid_sid("../x"));
     assert!(!crate::store::is_valid_sid("s..\\x"));
     assert!(!crate::store::is_valid_sid("x123"));
+}
+#[test]
+fn every_command_is_documented_in_the_skill() {
+    let skill = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/SKILL.md"))
+        .expect("读不到 SKILL.md");
+    for spec in crate::commands::COMMANDS {
+        if matches!(spec.name, "focus" | "scrollinto") {
+            continue; // 已禁用 / 是 scrollitem 的别名
+        }
+        assert!(
+            skill.contains(spec.name),
+            "命令 {} 没写进 SKILL.md（agent 会不知道它存在）",
+            spec.name
+        );
+    }
 }

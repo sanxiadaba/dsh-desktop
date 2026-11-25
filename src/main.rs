@@ -1,6 +1,7 @@
 mod act;
 mod cli;
 mod clipboard;
+mod commands;
 mod error;
 mod input;
 mod selftest;
@@ -82,18 +83,17 @@ fn main() {
 /// 命令结束后把前台还原回去（guard 命令本身除外），返回是否真的还原了。
 fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-    // guard 自己就是管前台的；wait 可能跑很久，期间用户切窗不该被拉回来。
-    if matches!(cmd, "guard" | "wait") || fg0.0.is_null() {
+    if fg0.0.is_null() {
         return false;
     }
     let fg = unsafe { GetForegroundWindow() };
     if fg == fg0 {
         return false;
     }
-    // launch 之后新程序常常自己激活；这种情况也要还原。
-    // 其他命令只在"当前前台是我们这次碰过的窗口"时还原，用户自己切走的不动。
-    let started_by_us = cmd == "launch";
-    if !started_by_us && !win::touched_windows().contains(&(fg.0 as usize)) {
+    // 只有两种情况还原：命令本身声明"可能引起前台变化"（launch），
+    // 或者当前前台正好是我们这次碰过的窗口。用户自己切走的不动。
+    let declared = commands::restore_any_foreground(cmd);
+    if !declared && !win::touched_windows().contains(&(fg.0 as usize)) {
         return false;
     }
     unsafe {
@@ -117,13 +117,8 @@ fn emit(envelope: &Value, file: Option<&std::path::Path>, pretty: bool) {
     }
 }
 
-/// 只读/诊断命令：非管理员也允许（用于排查环境）。
-fn is_readonly(cmd: &str) -> bool {
-    matches!(cmd, "help" | "--help" | "-h" | "status" | "elevate")
-}
-
-/// 本技能以管理员权限为运行前提：桌面自动化要投消息、读 UIA、操作提权窗口，
-/// 低完整性跑起来只会"看起来成功、实际没动"，所以直接拒绝，而不是打补丁。
+/// 管理员策略完全由 `commands::COMMANDS` 决定：表里 needs_admin=false 的命令
+/// 在非管理员下也能跑，其余一律 NEED_ADMIN。
 fn ensure_admin() -> Result<()> {
     match win::integrity_rid(std::process::id()) {
         Some(rid) if rid < 0x3000 => Err(DeskError::new(
@@ -141,7 +136,6 @@ fn ensure_admin() -> Result<()> {
         _ => Ok(()),
     }
 }
-
 fn run(argv: &[String]) -> Result<(String, Value)> {
     let Some(cmd) = argv.first().map(|s| s.as_str()) else {
         return Err(DeskError::new("BAD_ARGS", "缺少子命令").with_suggestion("desk help"));
@@ -151,7 +145,13 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
         return Ok((cmd.to_string(), json!({ "help": cli::help_for(cmd) })));
     }
     args.validate()?;
-    if !is_readonly(cmd) {
+    // 未知命令直接拒绝：命令清单只有 commands::COMMANDS 一份。
+    if commands::get(cmd).is_none() {
+        return Err(
+            DeskError::new("BAD_ARGS", format!("未知子命令：{cmd}")).with_suggestion("desk help")
+        );
+    }
+    if commands::needs_admin(cmd) {
         ensure_admin()?;
     }
     match cmd {
@@ -547,44 +547,6 @@ fn quote_arg(a: &str) -> String {
     out
 }
 
-fn known_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "status"
-            | "windows"
-            | "snap"
-            | "find"
-            | "info"
-            | "click"
-            | "rclick"
-            | "dclick"
-            | "select"
-            | "toggle"
-            | "set"
-            | "expand"
-            | "collapse"
-            | "scrollitem"
-            | "scrollinto"
-            | "scroll"
-            | "wheel"
-            | "drag"
-            | "key"
-            | "type"
-            | "shot"
-            | "clipboard"
-            | "wait"
-            | "guard"
-            | "minimize"
-            | "maximize"
-            | "restore"
-            | "close"
-            | "move"
-            | "resize"
-            | "launch"
-            | "selftest"
-    )
-}
-
 fn elevate_cmd(rest: &[String]) -> Result<Value> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
@@ -600,7 +562,7 @@ fn elevate_cmd(rest: &[String]) -> Result<Value> {
         return Err(need("<命令>").with_suggestion("例：desk elevate -- click @s1:e3"));
     }
     // 先在提权之前校验命令名，免得弹了 UAC 才报错。
-    if !known_command(&args[0]) {
+    if commands::get(&args[0]).is_none() {
         return Err(
             DeskError::new("BAD_ARGS", format!("elevate 不支持这个子命令：{}", args[0]))
                 .with_suggestion("desk help 查看可用命令"),

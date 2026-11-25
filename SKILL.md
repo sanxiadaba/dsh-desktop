@@ -142,6 +142,17 @@ $ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object
 
 `restore` 只恢复不激活；工具里没有把窗口切到前台的命令。
 
+## 其它命令
+
+```powershell
+& $desk find "button:保存" --window $win.id      # 等于 snap + 过滤
+& $desk info '@s1:e7' --window $win.id           # 单个元素完整信息（含 native_hwnd / 完整性）
+& $desk clipboard get                            # 读剪贴板文本
+& $desk clipboard set "文本"                      # 写剪贴板文本
+& $desk maximize $win.id                         # 最大化（不激活）
+& $desk guard --seconds 30 --window $win.id      # 临时钉住前台：目标自己跳出来就压回去
+```
+
 ## 观察别的形式
 
 ```powershell
