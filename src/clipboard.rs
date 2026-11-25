@@ -59,6 +59,14 @@ pub fn clear() -> Result<()> {
     Ok(())
 }
 
+/// 剪贴板里当前是否有文本（用来判断"粘贴后能不能还原"）。
+pub fn has_text() -> bool {
+    unsafe {
+        windows::Win32::System::DataExchange::IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32)
+            .is_ok()
+    }
+}
+
 pub fn get_text() -> Result<String> {
     unsafe {
         OpenClipboard(None)

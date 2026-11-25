@@ -18,6 +18,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 struct Counters {
+    lbutton_dblclick: AtomicI32,
+    wheel_child: AtomicI32,
     lbutton_down: AtomicI32,
     lbutton_up: AtomicI32,
     key_down: AtomicU32,
@@ -34,6 +36,8 @@ static CHILD_DOWN: AtomicI32 = AtomicI32::new(0);
 
 fn counters() -> &'static Counters {
     STATE.get_or_init(|| Counters {
+        lbutton_dblclick: AtomicI32::new(0),
+        wheel_child: AtomicI32::new(0),
         lbutton_down: AtomicI32::new(0),
         lbutton_up: AtomicI32::new(0),
         key_down: AtomicU32::new(0),
@@ -47,8 +51,19 @@ fn counters() -> &'static Counters {
 }
 
 unsafe extern "system" fn child_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    const WM_LBUTTONDBLCLK: u32 = 0x0203;
     if msg == WM_LBUTTONDOWN {
         CHILD_DOWN.fetch_add(1, Ordering::SeqCst);
+        return LRESULT(0);
+    }
+    if msg == WM_LBUTTONDBLCLK {
+        counters().lbutton_dblclick.fetch_add(1, Ordering::SeqCst);
+        return LRESULT(0);
+    }
+    if msg == WM_MOUSEWHEEL {
+        counters()
+            .wheel_child
+            .fetch_add((((wp.0 >> 16) & 0xffff) as i16) as i32, Ordering::SeqCst);
         return LRESULT(0);
     }
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
@@ -210,6 +225,27 @@ pub fn run() -> Result<Value> {
         "child received 1",
         format!("child_down={cd} err={:?}", child_click.err()),
         cd == 1,
+    );
+
+    // 1c) 双击与滚轮也要投给子窗口（和点击同一条路由规则）。
+    crate::input::double_click_screen(hwnd, ccx, ccy)?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let dbl = c.lbutton_dblclick.load(Ordering::SeqCst);
+    check(
+        "bg_dclick_child",
+        "child dblclick=1",
+        format!("dblclick={dbl}"),
+        dbl == 1,
+    );
+
+    crate::input::wheel_screen(hwnd, ccx, ccy, -120)?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let wc = c.wheel_child.load(Ordering::SeqCst);
+    check(
+        "bg_wheel_child",
+        "child wheel=-120",
+        format!("wheel={wc}"),
+        wc == -120,
     );
 
     // 2) 后台键盘：组合键的按下次数、最后一次的 VK。

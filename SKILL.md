@@ -194,7 +194,7 @@ $ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object
 | `BG_DELIVER_FAILED` | 目标不处理投递的消息 | 目标可能挂起，或它在 DirectX/UIPI 环境里 |
 | `WINDOW_GONE` | 窗口已关闭 | 重新 `windows` 找 |
 | `ELEVATION_MISMATCH` | 目标完整性比你高，UIPI 会拦消息 | 用管理员运行 DSH，或 `desk elevate -- <同样的命令>` |
-| `WAIT_TIMEOUT` | 等待条件没出现 | 加大 `--timeout-ms`；先确认程序真的在执行 |
+| `WAIT_TIMEOUT` | 等待条件没出现 | 加大 `--timeout-ms`；先确认程序真的在执行 |`n| `WATCHDOG_TIMEOUT` | 命令超时（目标挂死） | 先 `status`/`windows` 确认，必要时重启目标 |`n| `POINT_UNKNOWN` | 元素在视口外且滚不进来 | 先 `scrollitem`，或用语义动作 |
 | `NEED_ADMIN` | 当前不是管理员 | 用管理员启动 DSH/终端，或 `desk elevate -- ...` |
 | `BAD_ARGS` | 参数/选项不对（含拼错、缺值） | 按 `desk help` 改；动作类命令必须给 `--window`/`--ref` |
 | `BAD_REF` | ref 格式不对或快照 id 非法 | ref 必须来自本次 `desk snap` |
@@ -226,7 +226,7 @@ $ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object
 怀疑环境有问题时先跑自测，它不依赖任何外部程序：
 
 ```powershell
-& $desk selftest            # 7 项：消息注入、子窗口、键盘、文本、滚轮、枚举、截图
+& $desk selftest            # 9 项：消息注入、子窗口点击/双击/滚轮、键盘、文本、枚举、截图
 ```
 
 全绿说明注入层是好的，问题就在目标程序那一侧。

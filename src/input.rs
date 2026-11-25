@@ -10,11 +10,12 @@ use crate::error::{DeskError, Result};
 use crate::win::screen_to_client;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
+    MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const TIMEOUT_MS: u32 = 2000;
@@ -22,9 +23,20 @@ const MK_LBUTTON: usize = 0x0001;
 const MK_RBUTTON: usize = 0x0002;
 
 fn lparam_xy(x: i32, y: i32) -> LPARAM {
-    let lo = (x as u32 & 0xffff) as isize;
-    let hi = ((y as u32 & 0xffff) as isize) << 16;
+    // 消息里的坐标是 16 位有符号；超出范围说明调用方算错了，截断只会点错地方。
+    let lo = (x as i16 as u16) as isize;
+    let hi = ((y as i16 as u16) as isize) << 16;
     LPARAM(lo | hi)
+}
+
+fn check_xy(x: i32, y: i32) -> Result<()> {
+    if !(-32768..=32767).contains(&x) || !(-32768..=32767).contains(&y) {
+        return Err(DeskError::new(
+            "BAD_ARGS",
+            format!("坐标超出消息范围（{x},{y}），屏幕坐标必须在 -32768..32767 之间"),
+        ));
+    }
+    Ok(())
 }
 
 fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: LPARAM) -> bool {
@@ -100,6 +112,7 @@ fn deepest_child(root: HWND, sx: i32, sy: i32) -> HWND {
 }
 
 pub fn click_client(hwnd: HWND, cx: i32, cy: i32, button: Button) -> Result<()> {
+    check_xy(cx, cy)?;
     let (down, up, mk) = match button {
         Button::Left => (WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON),
         Button::Right => (WM_RBUTTONDOWN, WM_RBUTTONUP, MK_RBUTTON),
@@ -150,6 +163,8 @@ pub fn wheel_screen(hwnd: HWND, sx: i32, sy: i32, delta: i32) -> Result<()> {
 
 /// 拖拽：按下 → 若干移动 → 松开，全部走客户区坐标。
 pub fn drag_client(hwnd: HWND, from: (i32, i32), to: (i32, i32), steps: u32) -> Result<()> {
+    check_xy(from.0, from.1)?;
+    check_xy(to.0, to.1)?;
     let steps = steps.max(4);
     let lp0 = lparam_xy(from.0, from.1);
     let _ = send(hwnd, WM_MOUSEMOVE, 0, lp0);
@@ -170,24 +185,44 @@ pub fn drag_client(hwnd: HWND, from: (i32, i32), to: (i32, i32), steps: u32) -> 
 
 pub fn key_combo(hwnd: HWND, combo: &str) -> Result<()> {
     let (mods, vk) = parse_combo(combo)?;
+    let alt = mods.iter().any(|m| m.0 == VK_MENU.0);
+    let (down_msg, up_msg) = if alt {
+        (WM_SYSKEYDOWN, WM_SYSKEYUP)
+    } else {
+        (WM_KEYDOWN, WM_KEYUP)
+    };
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as usize;
+
+    // 用 Post 而不是 Send：消息进目标线程队列，让它的消息循环还有机会跑
+    // TranslateAccelerator / IsDialogMessage；Send 会直接调用窗口过程，绕开这些。
     let mut ok = true;
     for m in &mods {
-        ok &= send(hwnd, WM_KEYDOWN, m.0 as usize, LPARAM(0));
+        ok &= post(hwnd, down_msg, m.0 as usize, LPARAM(0x0001_0001));
     }
-    ok &= send(hwnd, WM_KEYDOWN, vk as usize, LPARAM(0x0001_0001));
-    std::thread::sleep(std::time::Duration::from_millis(15));
-    ok &= send(hwnd, WM_KEYUP, vk as usize, LPARAM(0xC001_0001u32 as isize));
+    ok &= post(
+        hwnd,
+        down_msg,
+        vk as usize,
+        LPARAM((0x0001 | (scan << 16)) as isize),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    ok &= post(
+        hwnd,
+        up_msg,
+        vk as usize,
+        LPARAM((0x0001 | (scan << 16) | 0xC000_0000u32 as usize) as isize),
+    );
     for m in mods.iter().rev() {
-        ok &= send(
+        ok &= post(
             hwnd,
-            WM_KEYUP,
+            up_msg,
             m.0 as usize,
-            LPARAM(0xC001_0001u32 as isize),
+            LPARAM((0x0001_0001 | 0xC000_0000u32 as usize) as isize),
         );
     }
     if !ok {
         return Err(
-            DeskError::new("BG_DELIVER_FAILED", "组合键投递失败：目标窗口没有处理消息")
+            DeskError::new("BG_DELIVER_FAILED", "组合键投递失败：目标窗口没有接收消息")
                 .with_suggestion("先用 `desk status` 确认窗口还在、进程没挂起")
                 .delivered(),
         );

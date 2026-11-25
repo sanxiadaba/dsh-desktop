@@ -21,11 +21,10 @@ use windows::Win32::UI::Accessibility::{
     IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_AutomationIdPropertyId,
     UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
     UIA_ExpandCollapsePatternId, UIA_HasKeyboardFocusPropertyId, UIA_InvokePatternId,
-    UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId,
-    UIA_LegacyIAccessiblePatternId, UIA_NamePropertyId, UIA_ScrollItemPatternId,
-    UIA_ScrollPatternId, UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId,
-    UIA_TogglePatternId, UIA_ToggleToggleStatePropertyId, UIA_ValuePatternId,
-    UIA_ValueValuePropertyId,
+    UIA_IsEnabledPropertyId, UIA_IsOffscreenPropertyId, UIA_LegacyIAccessiblePatternId,
+    UIA_NamePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
+    UIA_ToggleToggleStatePropertyId, UIA_ValuePatternId, UIA_ValueValuePropertyId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,7 +170,6 @@ impl Uia {
                 UIA_IsOffscreenPropertyId,
                 UIA_BoundingRectanglePropertyId,
                 UIA_HasKeyboardFocusPropertyId,
-                UIA_IsKeyboardFocusablePropertyId,
                 UIA_ValueValuePropertyId,
                 UIA_SelectionItemIsSelectedPropertyId,
                 UIA_ToggleToggleStatePropertyId,
@@ -355,9 +353,17 @@ impl Uia {
                     .map(|s| s.0 == 1);
                 let _ = &p;
             }
-            if let Ok(p) = el.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
+            if el
+                .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .is_ok()
+            {
                 out.push("set".to_string());
-                value = p.CachedValue().ok().map(|b| b.to_string());
+                // 值也读实时：切页后缓存值会变成空的。
+                value = el
+                    .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    .ok()
+                    .and_then(|live| live.CurrentValue().ok())
+                    .map(|b| b.to_string());
             }
             if el
                 .GetCachedPatternAs::<IUIAutomationExpandCollapsePattern>(

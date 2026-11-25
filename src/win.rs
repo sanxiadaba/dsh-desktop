@@ -270,7 +270,7 @@ pub fn exe_name(pid: u32) -> String {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return String::new();
         };
-        let mut buf = [0u16; 1024];
+        let mut buf = [0u16; 32768];
         let mut size = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(
             h,
@@ -321,7 +321,9 @@ pub fn integrity_rid(pid: u32) -> Option<u32> {
         let _ = CloseHandle(token);
         ok.ok()?;
 
-        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        // 缓冲区是 Vec<u8>，对齐只有 1；必须用 read_unaligned 取值。
+        let label = std::ptr::read_unaligned(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let label = &label;
         let sid = label.Label.Sid;
         if sid.is_invalid() {
             return None;

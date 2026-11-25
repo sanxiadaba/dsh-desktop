@@ -216,3 +216,18 @@ fn every_command_is_documented_in_the_skill() {
         );
     }
 }
+#[test]
+fn watchdog_budget_follows_declared_timeout() {
+    let with_timeout = crate::cli::Args::new(&argv(&["--timeout-ms", "5000"]));
+    assert_eq!(
+        crate::watchdog_budget(&with_timeout).as_millis(),
+        5_000 + 30_000
+    );
+    let with_seconds = crate::cli::Args::new(&argv(&["--seconds", "10"]));
+    assert_eq!(
+        crate::watchdog_budget(&with_seconds).as_millis(),
+        10_000 + 30_000
+    );
+    let plain = crate::cli::Args::new(&argv(&[]));
+    assert!(crate::watchdog_budget(&plain).as_millis() >= 5_000);
+}

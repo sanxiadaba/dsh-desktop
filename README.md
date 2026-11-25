@@ -122,7 +122,7 @@ UIPI（User Interface Privilege Isolation）规定：**低级别进程不能把�
   这类目标应该用 CDP（`edge-browser` 技能）。
 - **最小化窗口**：UIA 语义动作通常还能用；坐标点击不行（没有布局），先 `restore`。
 - **提权窗口**：本进程需要与目标同级或更高完整性，否则消息会被 UIPI 丢弃。
-- **输入法**：`type` 默认走 `WM_CHAR`，会绕过输入法；`--method paste` 会临时占用剪贴板，命令结束会恢复原文本。`n- **`key` 是 best-effort**：投递的是窗口消息，不经过目标线程的 TranslateAccelerator，少数程序的快捷键可能不触发；文档与返回里的 `mode` 会说明走的是投递路径。
+- **输入法**：`type` 默认走 `WM_CHAR`，会绕过输入法；`--method paste` 会临时占用剪贴板，命令结束会恢复原文本；原本不是文本（图片/文件）时无法还原，返回里 `clipboard_restored:false`。`n- **看门狗**：UIA / PrintWindow 都是阻塞调用，单条命令默认 60 秒（`DESK_WATCHDOG_MS` 可调）没返回就报 `WATCHDOG_TIMEOUT` 并退出，不会永久挂住；`--timeout-ms` / `--seconds` 会按声明值放宽。`n- **`key` 是 best-effort**：投递的是窗口消息，不经过目标线程的 TranslateAccelerator，少数程序的快捷键可能不触发；文档与返回里的 `mode` 会说明走的是投递路径。
 - 只支持 Windows 10 1809+ / Windows 11。
 
 ## 开发
@@ -131,7 +131,7 @@ UIPI（User Interface Privilege Isolation）规定：**低级别进程不能把�
 cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo test                       # 18 个纯单元测试，不需要桌面
-& .\target\debug\desk.exe selftest   # 7 项，自己开窗验证消息注入，不碰你的桌面
+& .\target\debug\desk.exe selftest   # 9 项，自己开窗验证消息注入（含子窗口双击/滚轮），不碰你的桌面
 ```
 
 没有远程 CI：这个工具的行为依赖真实桌面环境，验证在本地做。

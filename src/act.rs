@@ -159,6 +159,18 @@ where
 /// 列表项/页签这类元素有的程序把 Invoke 实现成空操作（PowerWriter 的芯片列表就是），
 /// 回读发现没选中就退回后台点击，避免"返回 ok 但界面没动"。
 /// 轮询直到状态变化（或超时），返回最后一次读到的值。
+/// 动作的验证方式：不同控件能回读的状态不一样，但"动作→回读→回退"这条策略只有一条。
+#[derive(Clone, Copy, PartialEq)]
+enum Verify {
+    /// 没有可回读的状态（普通按钮、菜单项）：发完即返回，不补点。
+    None,
+    /// 期望变成"已选中"（选中类元素）。
+    Becomes,
+    /// 期望状态翻转（勾选类元素）。
+    Flips,
+}
+
+/// 轮询直到状态变化（或超时），返回最后一次读到的值。
 fn poll_state(
     mut read: impl FnMut() -> Option<bool>,
     before: Option<bool>,
@@ -173,91 +185,118 @@ fn poll_state(
     last
 }
 
+/// 执行一个语义动作，按 `verify` 回读确认；程序收了没反应就退回后台点击。
+///
+/// 所有"需要验证的动作"都走这一条：invoke/select/toggle 不再各写一份。
+fn act_verified<F>(
+    _uia: &Uia,
+    r: &Resolved,
+    label: &str,
+    verify: Verify,
+    mut read: impl FnMut() -> Option<bool>,
+    act: F,
+) -> Result<(String, bool)>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let unchanged = |before: Option<bool>, after: Option<bool>| match verify {
+        Verify::None => true,
+        Verify::Becomes => after == Some(true) || before == Some(true),
+        Verify::Flips => after != before,
+    };
+
+    // 没有可回读状态：信任语义动作，绝不补第二次点击（会变成点两下）。
+    if matches!(verify, Verify::None) {
+        let (res, stolen) = guarded(act);
+        res?;
+        return Ok((format!("semantic:{label}"), stolen));
+    }
+    let before = read();
+    if before.is_none() {
+        let (res, stolen) = guarded(act);
+        res?;
+        return Ok((format!("semantic:{label}"), stolen));
+    }
+
+    let (res, mut stolen) = guarded(act);
+    res?;
+    let after = poll_state(&mut read, before, 150);
+    if unchanged(before, after) {
+        return Ok((format!("semantic:{label}"), stolen));
+    }
+
+    // 程序收下了但没生效：按元素矩形投一次后台点击，再回读。
+    let (x, y) = ensure_center(_uia, r)?;
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    ensure_inside(hwnd, x, y)?;
+    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
+    res2?;
+    stolen |= stolen2;
+    let after2 = poll_state(&mut read, after, 150);
+    if unchanged(before, after2) {
+        Ok((format!("bg:{label}-fallback"), stolen))
+    } else {
+        Ok((format!("bg:{label}-unverified"), stolen))
+    }
+}
+
 fn invoke_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
     let selectable = matches!(
         r.node.role.as_str(),
         "listitem" | "tabitem" | "radio" | "dataitem" | "treeitem" | "menuitem"
     );
-    // 普通按钮没有可回读的状态：发完就返回，不再空等。
-    if !selectable {
-        let (res, stolen) = guarded(|| uia.invoke(&r.element));
-        res?;
-        return Ok(("semantic:invoke".to_string(), stolen));
-    }
-
-    let before = uia.is_selected(&r.element);
-    let (res, mut stolen) = guarded(|| uia.invoke(&r.element));
-    res?;
-    // 读不到选中态（菜单项、部分树节点）时信任 Invoke，绝不补第二次点击。
-    if before.is_none() {
-        return Ok(("semantic:invoke".to_string(), stolen));
-    }
-    let after = poll_state(|| uia.is_selected(&r.element), before, 150);
-    if after == Some(true) || (before == Some(true) && after == before) {
-        return Ok(("semantic:invoke".to_string(), stolen));
-    }
-
-    let (x, y) = center(&r.node);
-    let hwnd = win::parse_window_id(&r.window_id)?;
-    ensure_inside(hwnd, x, y)?;
-    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
-    res2?;
-    stolen |= stolen2;
-    let after2 = poll_state(|| uia.is_selected(&r.element), after, 150);
-    if after2 == Some(true) {
-        Ok(("bg:invoke-fallback".to_string(), stolen))
+    let verify = if selectable {
+        Verify::Becomes
     } else {
-        Ok(("bg:invoke-unverified".to_string(), stolen))
-    }
+        Verify::None
+    };
+    act_verified(
+        uia,
+        r,
+        "invoke",
+        verify,
+        || uia.is_selected(&r.element),
+        || uia.invoke(&r.element),
+    )
 }
 
-/// 选中并用状态回读确认：有些程序实现了 SelectionItemPattern 却不理它
-/// （PowerWriter 的芯片列表就是），回读发现没变就退回后台点击。
 fn select_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
-    let before = uia.is_selected(&r.element);
-    let (res, mut stolen) = guarded(|| uia.select(&r.element));
-    res?;
-    let after = poll_state(|| uia.is_selected(&r.element), before, 150);
-    if after == Some(true) || before == Some(true) {
-        return Ok(("semantic:select".to_string(), stolen));
-    }
-
-    let (x, y) = center(&r.node);
-    let hwnd = win::parse_window_id(&r.window_id)?;
-    ensure_inside(hwnd, x, y)?;
-    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
-    res2?;
-    stolen |= stolen2;
-    let after2 = poll_state(|| uia.is_selected(&r.element), after, 150);
-    if after2 == Some(true) {
-        Ok(("bg:select-fallback".to_string(), stolen))
-    } else {
-        Ok(("bg:select-unverified".to_string(), stolen))
-    }
+    act_verified(
+        uia,
+        r,
+        "select",
+        Verify::Becomes,
+        || uia.is_selected(&r.element),
+        || uia.select(&r.element),
+    )
 }
 
-/// 切换勾选框并回读确认，没变就退回后台点击。
 fn toggle_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
-    let before = uia.is_toggled(&r.element);
-    let (res, mut stolen) = guarded(|| uia.toggle(&r.element));
-    res?;
-    let after = poll_state(|| uia.is_toggled(&r.element), before, 150);
-    if after != before {
-        return Ok(("semantic:toggle".to_string(), stolen));
+    act_verified(
+        uia,
+        r,
+        "toggle",
+        Verify::Flips,
+        || uia.is_toggled(&r.element),
+        || uia.toggle(&r.element),
+    )
+}
+/// 取元素中心点；拿不到矩形（列表项未实例化/在视口外）就先滚进来再读。
+fn ensure_center(uia: &Uia, r: &Resolved) -> Result<(i32, i32)> {
+    if !r.node.rect.is_empty() {
+        return Ok(center(&r.node));
     }
-
-    let (x, y) = center(&r.node);
-    let hwnd = win::parse_window_id(&r.window_id)?;
-    ensure_inside(hwnd, x, y)?;
-    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
-    res2?;
-    stolen |= stolen2;
-    let after2 = poll_state(|| uia.is_toggled(&r.element), after, 150);
-    if after2 != after {
-        Ok(("bg:toggle-fallback".to_string(), stolen))
-    } else {
-        Ok(("bg:toggle-unverified".to_string(), stolen))
+    let _ = uia.scroll_into_view(&r.element);
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    if let Some(rect) = uia.rect_of(&r.element)
+        && !rect.is_empty()
+    {
+        return Ok((rect.x + rect.width / 2, rect.y + rect.height / 2));
     }
+    Err(
+        DeskError::new("POINT_UNKNOWN", "拿不到元素坐标（元素在视口外且滚不进来）")
+            .with_suggestion("改用语义动作（不加 --mode bg），或先 `desk scrollitem <@ref>`"),
+    )
 }
 
 fn center(node: &Node) -> (i32, i32) {
@@ -304,7 +343,7 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
     }
 
     // 语义路走不通：退回后台注入（不抢前台、不动光标）。
-    let (x, y) = center(&r.node);
+    let (x, y) = ensure_center(uia, &r)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
     let (res, stolen) =
@@ -330,7 +369,7 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
 /// 右键 / 双击：只走后台注入（语义层没有这两个动作）。
 pub fn right_click(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (x, y) = center(&r.node);
+    let (x, y) = ensure_center(uia, &r)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
     input::click_screen(hwnd, x, y, input::Button::Right)?;
@@ -339,7 +378,7 @@ pub fn right_click(uia: &Uia, ref_id: &str) -> Result<Value> {
 
 pub fn double_click(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (x, y) = center(&r.node);
+    let (x, y) = ensure_center(uia, &r)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
     input::double_click_screen(hwnd, x, y)?;
@@ -458,7 +497,7 @@ pub fn type_text(hwnd: HWND, text: &str) -> Result<Value> {
 pub fn scroll_ref(uia: &Uia, ref_id: &str, delta: i32) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
-    let (x, y) = center(&r.node);
+    let (x, y) = ensure_center(uia, &r)?;
     let (res, stolen) = guarded(|| input::wheel_screen(hwnd, x, y, delta));
     res?;
     let mut out = json!({

@@ -81,6 +81,47 @@ fn main() {
 }
 
 /// 命令结束后把前台还原回去（guard 命令本身除外），返回是否真的还原了。
+/// 看门狗预算：命令自己声明了超时（--timeout-ms / --seconds）就按它加余量，
+/// 否则用 DESK_WATCHDOG_MS 或默认 60 秒。不按命令名特判。
+fn watchdog_budget(args: &Args) -> Duration {
+    let declared_ms = args.int("--timeout-ms").ok().flatten().or_else(|| {
+        args.int("--seconds")
+            .ok()
+            .flatten()
+            .map(|s| s.saturating_mul(1000))
+    });
+    if let Some(ms) = declared_ms {
+        return Duration::from_millis(ms.max(1000) as u64 + 30_000);
+    }
+    let from_env = std::env::var("DESK_WATCHDOG_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+    Duration::from_millis(from_env.unwrap_or(60_000).max(5_000))
+}
+
+fn start_watchdog(limit: Duration) {
+    std::thread::spawn(move || {
+        std::thread::sleep(limit);
+        let envelope = json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "ok": false,
+            "command": "watchdog",
+            "elapsed_ms": limit.as_millis() as u64,
+            "error": {
+                "code": "WATCHDOG_TIMEOUT",
+                "message": format!(
+                    "命令超过 {} ms 没有返回（目标进程可能挂死），已强制退出",
+                    limit.as_millis()
+                ),
+                "retry": "unsafe",
+                "suggestion": "先 `desk status` / `desk windows` 确认目标状态；必要时重启目标程序"
+            }
+        });
+        println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
+        std::process::exit(5);
+    });
+}
+
 fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
     if fg0.0.is_null() {
@@ -154,6 +195,9 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
     if commands::needs_admin(cmd) {
         ensure_admin()?;
     }
+    // 看门狗：UIA / PrintWindow 都是阻塞调用，目标挂死时整条命令会永远不返回。
+    // 单次执行，超时直接给出明确错误并退出，比挂住好。
+    start_watchdog(watchdog_budget(&args));
     match cmd {
         "help" => Ok(("help".into(), json!({ "help": cli::help_for("") }))),
         "status" => Ok(("status".into(), status()?)),
@@ -330,10 +374,15 @@ fn walk_options(args: &Args) -> Result<WalkOptions> {
 }
 
 fn snap_cmd(args: &Args) -> Result<Value> {
+    let uia = Uia::new()?;
+    snap_with(&uia, args)
+}
+
+/// 快照 + 过滤。find 复用同一个 UIA 实例，不再重复初始化。
+fn snap_with(uia: &Uia, args: &Args) -> Result<Value> {
     let hwnd = target_window(args)?;
     let opts = walk_options(args)?;
-    let uia = Uia::new()?;
-    let mut out = act::snap(&uia, hwnd, &opts, true)?;
+    let mut out = act::snap(uia, hwnd, &opts, true)?;
     if args.has("--actionable") {
         filter_elements(&mut out, |e| {
             e.get("actions")
@@ -362,8 +411,8 @@ fn filter_elements(out: &mut Value, keep: impl Fn(&Value) -> bool) {
 }
 
 fn find_cmd(args: &Args) -> Result<Value> {
-    let _uia = Uia::new()?;
-    let mut out = snap_cmd(args)?;
+    let uia = Uia::new()?;
+    let mut out = snap_with(&uia, args)?;
     let selector = args.positionals().first().cloned().unwrap_or_default();
     if selector.is_empty() {
         return Ok(out);
@@ -451,23 +500,35 @@ fn type_cmd(args: &Args) -> Result<(String, Value)> {
     let hwnd = target_window(args)?;
     match method.as_str() {
         "paste" | "clipboard" => {
-            // 保存用户原来的剪贴板，粘完恢复；失败也不留下敏感文本。
-            let previous = clipboard::get_text().ok();
+            // 只有原本是文本才能还原；图片/文件类剪贴板无法还原，如实告知。
+            let had_text = clipboard::has_text();
+            let previous = if had_text {
+                clipboard::get_text().ok()
+            } else {
+                None
+            };
             clipboard::set_text(text)?;
             let key_hwnd = typing_hwnd(hwnd);
             let result = input::paste(key_hwnd);
-            match previous {
-                Some(prev) => {
-                    let _ = clipboard::set_text(&prev);
-                }
+            let restored = match &previous {
+                Some(prev) => clipboard::set_text(prev).is_ok(),
                 None => {
-                    let _ = clipboard::clear();
+                    if had_text {
+                        clipboard::clear().is_ok()
+                    } else {
+                        false
+                    }
                 }
-            }
+            };
             result?;
             Ok((
                 "type".into(),
-                json!({"mode": "paste", "chars": text.chars().count()}),
+                json!({
+                    "mode": "paste",
+                    "chars": text.chars().count(),
+                    "clipboard_restored": restored,
+                    "clipboard_had_text": had_text,
+                }),
             ))
         }
         "value" => {
@@ -671,6 +732,7 @@ fn guard_cmd(args: &Args) -> Result<Value> {
     }
     let deadline = Instant::now() + Duration::from_secs(secs);
     let mut restores = 0u32;
+    let mut failed = 0u32;
     while Instant::now() < deadline {
         let fg = unsafe { GetForegroundWindow() };
         if fg != keep && !fg.0.is_null() {
@@ -682,10 +744,12 @@ fn guard_cmd(args: &Args) -> Result<Value> {
                 None => true,
             };
             if hit {
-                unsafe {
-                    let _ = SetForegroundWindow(keep);
+                let ok = unsafe { SetForegroundWindow(keep) }.as_bool();
+                if ok {
+                    restores += 1;
+                } else {
+                    failed += 1;
                 }
-                restores += 1;
             } else {
                 // 用户自己切到别的程序了，跟着走，不再钉住。
                 break;
@@ -697,6 +761,7 @@ fn guard_cmd(args: &Args) -> Result<Value> {
         "kept": win::window_id(keep),
         "seconds": secs,
         "restores": restores,
+        "restore_failed": failed,
         "note": "期间目标程序抢前台会被压回去；用户切到别的程序就自动停止",
     }))
 }
