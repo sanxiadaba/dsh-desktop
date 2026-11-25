@@ -64,7 +64,7 @@ pub fn resolve(uia: &Uia, ref_id: &str) -> Result<Resolved> {
     }
 
     // 路径失效再按身份找，只有唯一匹配才继续。
-    let el = uia.locate(hwnd, &node)?;
+    let el = uia.locate(hwnd, &node, snap.raw_view)?;
     if let Some(fresh) = uia.rect_of(&el) {
         node.rect = fresh;
     }
@@ -315,7 +315,11 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
         "actions": tried,
         "at": {"x": x, "y": y},
         "element": {"role": r.node.role, "name": r.node.name},
-        "note": "该元素没有可用的 UIA 动作，已改为投递后台鼠标消息",
+        "note": if force_bg {
+            "按 --mode bg 直接投递后台鼠标消息"
+        } else {
+            "该元素没有可用的 UIA 动作，已改为投递后台鼠标消息"
+        },
     });
     if stolen {
         out["focus_restored"] = json!(true);

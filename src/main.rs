@@ -90,9 +90,10 @@ fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
     if fg == fg0 {
         return false;
     }
-    // 只有当前前台是我们这次真的碰过的窗口（目标程序把自己顶上来）才还原；
-    // 用户自己切到别的程序时不动他。
-    if !win::touched_windows().contains(&(fg.0 as usize)) {
+    // launch 之后新程序常常自己激活；这种情况也要还原。
+    // 其他命令只在"当前前台是我们这次碰过的窗口"时还原，用户自己切走的不动。
+    let started_by_us = cmd == "launch";
+    if !started_by_us && !win::touched_windows().contains(&(fg.0 as usize)) {
         return false;
     }
     unsafe {

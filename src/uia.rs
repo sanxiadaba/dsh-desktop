@@ -24,7 +24,8 @@ use windows::Win32::UI::Accessibility::{
     UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId,
     UIA_LegacyIAccessiblePatternId, UIA_NamePropertyId, UIA_ScrollItemPatternId,
     UIA_ScrollPatternId, UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId,
-    UIA_TogglePatternId, UIA_ValuePatternId, UIA_ValueValuePropertyId,
+    UIA_TogglePatternId, UIA_ToggleToggleStatePropertyId, UIA_ValuePatternId,
+    UIA_ValueValuePropertyId,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +174,7 @@ impl Uia {
                 UIA_IsKeyboardFocusablePropertyId,
                 UIA_ValueValuePropertyId,
                 UIA_SelectionItemIsSelectedPropertyId,
+                UIA_ToggleToggleStatePropertyId,
             ] {
                 let _ = cache.AddProperty(id);
             }
@@ -334,12 +336,24 @@ impl Uia {
                 .GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
             {
                 out.push("select".to_string());
-                selected = p.CachedIsSelected().ok().map(|b| b.as_bool());
+                selected = el
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                    .ok()
+                    .and_then(|live| live.CurrentIsSelected().ok())
+                    .map(|b| b.as_bool());
+                let _ = &p;
             }
             if let Ok(p) = el.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
             {
                 out.push("toggle".to_string());
-                checked = p.CachedToggleState().ok().map(|s| s.0 == 1);
+                checked = el
+                    .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                    .ok()
+                    .and_then(|live| live.CurrentToggleState().ok())
+                    .map(|s| s.0 == 1);
+                let _ = &p;
             }
             if let Ok(p) = el.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) {
                 out.push("set".to_string());
@@ -450,9 +464,9 @@ impl Uia {
     }
 
     /// 界面变了以后按 (角色, automation_id/名字, 矩形重叠) 重新定位，要求唯一。
-    pub fn locate(&self, hwnd: HWND, node: &Node) -> Result<IUIAutomationElement> {
+    pub fn locate(&self, hwnd: HWND, node: &Node, raw_view: bool) -> Result<IUIAutomationElement> {
         let root = self.element_from_handle(hwnd)?;
-        let walker = self.walker(false)?;
+        let walker = self.walker(raw_view)?;
         let mut hits: Vec<(IUIAutomationElement, Rect)> = Vec::new();
         self.collect(&walker, &root, node, &mut hits, 0);
         match hits.len() {
