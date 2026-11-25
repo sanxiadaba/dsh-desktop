@@ -28,7 +28,13 @@ fn main() {
     let started = Instant::now();
     let fg0 = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
 
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    // 提权子进程用这个把自己那份 JSON 写回文件（跨 UAC 拿不到管道）。
+    let mut result_file: Option<std::path::PathBuf> = None;
+    if argv.len() >= 2 && argv[0] == "--result-file" {
+        result_file = Some(std::path::PathBuf::from(argv[1].clone()));
+        argv.drain(0..2);
+    }
 
     // help 直接输出纯文本，不套 JSON 信封；其他命令一律 JSON。
     if matches!(
@@ -52,7 +58,7 @@ fn main() {
                 "side_effects": { "foreground_restored": restored },
                 "data": data,
             });
-            println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+            emit(&envelope, result_file.as_deref());
         }
         Err(e) => {
             let cmd = argv.first().cloned().unwrap_or_default();
@@ -65,7 +71,7 @@ fn main() {
                 "side_effects": { "foreground_restored": restored },
                 "error": e.to_json(),
             });
-            println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+            emit(&envelope, result_file.as_deref());
             std::process::exit(1);
         }
     }
@@ -86,6 +92,16 @@ fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
     }
     std::thread::sleep(Duration::from_millis(20));
     unsafe { GetForegroundWindow() == fg0 }
+}
+
+fn emit(envelope: &Value, file: Option<&std::path::Path>) {
+    let text = serde_json::to_string_pretty(envelope).unwrap_or_default();
+    match file {
+        Some(p) => {
+            let _ = std::fs::write(p, text);
+        }
+        None => println!("{text}"),
+    }
 }
 
 fn run(argv: &[String]) -> Result<(String, Value)> {
@@ -171,6 +187,7 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
         "clipboard" => clipboard_cmd(&args),
         "wait" => Ok(("wait".into(), wait_cmd(&args)?)),
         "guard" => Ok(("guard".into(), guard_cmd(&args)?)),
+        "elevate" => Ok(("elevate".into(), elevate_cmd(&argv[1..])?)),
         "run" => Ok(("run".into(), run_cmd(&args)?)),
         "selftest" => Ok(("selftest".into(), selftest::run()?)),
         "focus" => Err(
@@ -220,6 +237,7 @@ fn status() -> Result<Value> {
         "exe": std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
         "pid": std::process::id(),
         "elevated": win::is_elevated(std::process::id()),
+        "integrity": win::integrity_label(std::process::id()),
         "windows": all.len(),
         "foreground": foreground.map(|w| json!({"id": w.id, "title": w.title, "exe": w.exe})),
         "state_dir": state_dir().display().to_string(),
@@ -453,6 +471,74 @@ fn clipboard_cmd(args: &Args) -> Result<(String, Value)> {
 
 /// 临时钉住前台：在 N 秒内，只要目标程序把自己顶到前台，就把它压回去。
 /// 有些上位机会定时自我激活，用这个压住。
+/// 以管理员身份重新执行同一条命令，并把结果带回来。
+/// 只在目标进程完整性更高（UIPI 会拦）时才需要。
+fn elevate_cmd(rest: &[String]) -> Result<Value> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+
+    let rest: Vec<String> = rest
+        .iter()
+        .filter(|a| a.as_str() != "--")
+        .cloned()
+        .collect();
+    if rest.is_empty() {
+        return Err(need("<命令>").with_suggestion("例：desk elevate -- click @s1:e3"));
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| DeskError::new("ELEVATE_FAILED", format!("取自身路径失败：{e}")))?;
+    let out = state_dir().join(format!("elevated-{}.json", now_ms()));
+    let mut params = format!("--result-file \"{}\"", out.display());
+    for a in &rest {
+        params.push(' ');
+        if a.contains(' ') || a.contains('"') {
+            params.push('"');
+            params.push_str(&a.replace('"', "\\\""));
+            params.push('"');
+        } else {
+            params.push_str(a);
+        }
+    }
+
+    let verb = windows::core::HSTRING::from("runas");
+    let file = windows::core::HSTRING::from(exe.to_string_lossy().to_string());
+    let params_h = windows::core::HSTRING::from(params);
+    let mut sei = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: windows::core::PCWSTR(verb.as_ptr()),
+        lpFile: windows::core::PCWSTR(file.as_ptr()),
+        lpParameters: windows::core::PCWSTR(params_h.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
+    unsafe { ShellExecuteExW(&mut sei) }.map_err(|e| {
+        DeskError::new(
+            "ELEVATE_FAILED",
+            format!("提权启动失败（UAC 被取消或策略禁止）：{e}"),
+        )
+    })?;
+    let h = sei.hProcess;
+    if !h.is_invalid() {
+        unsafe {
+            WaitForSingleObject(h, INFINITE);
+            let _ = CloseHandle(h);
+        }
+    }
+    let text = std::fs::read_to_string(&out).map_err(|e| {
+        DeskError::new(
+            "ELEVATE_FAILED",
+            format!("提权进程没有留下结果（可能被取消）：{e}"),
+        )
+    })?;
+    let _ = std::fs::remove_file(&out);
+    let child: Value = serde_json::from_str(&text)
+        .map_err(|e| DeskError::new("ELEVATE_FAILED", format!("提权结果解析失败：{e}")))?;
+    Ok(json!({ "elevated": true, "result": child }))
+}
+
 fn guard_cmd(args: &Args) -> Result<Value> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
     args.reject_unknown(&["--seconds", "--window", "--exe"])?;

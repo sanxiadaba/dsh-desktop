@@ -50,6 +50,8 @@ pub struct WindowInfo {
     pub visible: bool,
     pub focused: bool,
     pub elevated: bool,
+    /// 完整性级别：low / medium / high / system / protected。
+    pub integrity: String,
 }
 
 pub fn window_id(hwnd: HWND) -> String {
@@ -139,6 +141,7 @@ pub unsafe fn describe(hwnd: HWND, include_invisible: bool) -> Option<WindowInfo
             visible,
             focused: GetForegroundWindow() == hwnd,
             elevated: is_elevated(pid),
+            integrity: integrity_label(pid),
         })
     }
 }
@@ -264,6 +267,81 @@ pub fn exe_name(pid: u32) -> String {
             return full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string();
         }
         String::new()
+    }
+}
+
+/// 进程的完整性级别 RID：0x1000 低、0x2000 中、0x3000 高、0x4000 系统。
+pub fn integrity_rid(pid: u32) -> Option<u32> {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
+        TOKEN_QUERY, TokenIntegrityLevel,
+    };
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut token = HANDLE::default();
+        let opened = OpenProcessToken(h, TOKEN_QUERY, &mut token);
+        let _ = CloseHandle(h);
+        opened.ok()?;
+
+        // 先问需要多大，再按实际大小取：TOKEN_MANDATORY_LABEL 后面还跟着一个 SID。
+        let mut need = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut need);
+        if need == 0 {
+            let _ = CloseHandle(token);
+            return None;
+        }
+        let mut buf = vec![0u8; need as usize];
+        let ok = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            need,
+            &mut need,
+        );
+        let _ = CloseHandle(token);
+        ok.ok()?;
+
+        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let sid = label.Label.Sid;
+        if sid.is_invalid() {
+            return None;
+        }
+        let count = *GetSidSubAuthorityCount(sid);
+        if count == 0 {
+            return None;
+        }
+        let rid = *GetSidSubAuthority(sid, (count - 1) as u32);
+        Some(rid)
+    }
+}
+pub fn integrity_name(rid: u32) -> &'static str {
+    match rid {
+        0x0000 => "untrusted",
+        0x1000..=0x1fff => "low",
+        0x2000..=0x2fff => "medium",
+        0x3000..=0x3fff => "high",
+        0x4000..=0x4fff => "system",
+        _ => "protected",
+    }
+}
+
+pub fn integrity_label(pid: u32) -> String {
+    match integrity_rid(pid) {
+        Some(rid) => format!("{} (0x{rid:x})", integrity_name(rid)),
+        None => "unknown".to_string(),
+    }
+}
+
+/// 我们能不能把消息/输入投给这个进程：调用方完整性必须 >= 目标。
+pub fn can_reach(target_pid: u32) -> std::result::Result<(), (Option<u32>, Option<u32>)> {
+    let me = integrity_rid(std::process::id());
+    let them = integrity_rid(target_pid);
+    match (me, them) {
+        (Some(a), Some(b)) if a < b => Err((Some(a), Some(b))),
+        _ => Ok(()),
     }
 }
 

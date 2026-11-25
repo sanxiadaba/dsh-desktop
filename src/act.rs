@@ -44,6 +44,8 @@ pub fn resolve(uia: &Uia, ref_id: &str) -> Result<Resolved> {
         });
     }
 
+    ensure_reachable(hwnd)?;
+
     // 路径失效再按身份找，只有唯一匹配才继续。
     let el = uia.locate(hwnd, &node)?;
     Ok(Resolved {
@@ -86,6 +88,36 @@ fn ensure_inside(hwnd: HWND, sx: i32, sy: i32) -> Result<()> {
         .with_suggestion("先用 scrollitem 把它滚进可见区，或不加 --mode bg 走语义动作"));
     }
     Ok(())
+}
+
+/// Windows 的 UIPI：完整性级别低的一方不能把消息/输入投给高的一方。
+/// 这里提前拦下，给出具体级别和解决办法，而不是让程序"点了没反应"。
+pub fn ensure_reachable(hwnd: HWND) -> Result<()> {
+    let Some(info) = (unsafe { win::describe(hwnd, true) }) else {
+        return Ok(());
+    };
+    match win::can_reach(info.pid) {
+        Ok(()) => Ok(()),
+        Err((Some(me), Some(target))) => Err(DeskError::new(
+            "ELEVATION_MISMATCH",
+            format!(
+                "目标进程完整性（{}）高于本工具（{}），Windows 的 UIPI 会丢弃所有窗口消息和输入",
+                win::integrity_name(target),
+                win::integrity_name(me)
+            ),
+        )
+        .with_details(json!({
+            "tool_integrity": win::integrity_name(me),
+            "target_integrity": win::integrity_name(target),
+            "target_pid": info.pid,
+            "target_exe": info.exe,
+        }))
+        .with_suggestion(
+            "用管理员身份运行 DSH/终端；或 `desk elevate -- <同样的命令>` 以更高完整性重新执行",
+        )),
+        // 读不到级别就不拦，交给实际发送失败兜底
+        Err(_) => Ok(()),
+    }
 }
 
 /// 执行一个动作并保持前台不变；返回值里带上"是否发生过抢占"。
@@ -277,6 +309,10 @@ pub fn info(uia: &Uia, ref_id: &str) -> Result<Value> {
         "focused": unsafe { r.element.CurrentHasKeyboardFocus() }.map(|b| b.as_bool()).unwrap_or(false),
         "keyboard_focusable": unsafe { r.element.CurrentIsKeyboardFocusable() }.map(|b| b.as_bool()).unwrap_or(false),
         "native_hwnd": native,
+        "target_integrity": unsafe { win::describe(win::parse_window_id(&r.window_id)?, true) }
+            .map(|i| i.integrity)
+            .unwrap_or_else(|| "unknown".to_string()),
+        "tool_integrity": win::integrity_label(std::process::id()),
         "window_id": r.window_id,
     }))
 }
@@ -338,6 +374,7 @@ pub fn expand(uia: &Uia, ref_id: &str, open: bool) -> Result<Value> {
 
 /// 后台键盘 / 文本：直接发给窗口，不抢前台。
 pub fn key(hwnd: HWND, combo: &str) -> Result<Value> {
+    ensure_reachable(hwnd)?;
     let (res, stolen) = input::with_foreground_guard(|| input::key_combo(hwnd, combo));
     res?;
     let mut out = json!({"mode": "bg:key", "combo": combo});
@@ -348,6 +385,7 @@ pub fn key(hwnd: HWND, combo: &str) -> Result<Value> {
 }
 
 pub fn type_text(hwnd: HWND, text: &str) -> Result<Value> {
+    ensure_reachable(hwnd)?;
     let (res, stolen) = input::with_foreground_guard(|| input::type_text(hwnd, text));
     res?;
     let mut out = json!({"mode": "bg:type", "chars": text.chars().count()});
@@ -358,12 +396,14 @@ pub fn type_text(hwnd: HWND, text: &str) -> Result<Value> {
 }
 
 pub fn wheel(hwnd: HWND, x: i32, y: i32, delta: i32) -> Result<Value> {
+    ensure_reachable(hwnd)?;
     let (res, _stolen) = input::with_foreground_guard(|| input::wheel_screen(hwnd, x, y, delta));
     res?;
     Ok(json!({"mode": "bg:wheel", "delta": delta}))
 }
 
 pub fn drag(hwnd: HWND, from: (i32, i32), to: (i32, i32)) -> Result<Value> {
+    ensure_reachable(hwnd)?;
     let (cx0, cy0) = win::screen_to_client(hwnd, from.0, from.1);
     let (cx1, cy1) = win::screen_to_client(hwnd, to.0, to.1);
     let (res, _stolen) = guarded(|| input::drag_client(hwnd, (cx0, cy0), (cx1, cy1), 24));

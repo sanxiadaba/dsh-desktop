@@ -89,6 +89,27 @@ $desk = "$env:USERPROFILE\.dsh\skills\desktop\desk.exe"
 - `focus` 命令已删除（调用返回 `DISABLED`）；`--mode physical` 已删除（返回 `BAD_ARGS`）。
 - 需要临时压住"自己定时置顶"的上位机时用 `desk guard --seconds N`。
 
+## 完整性级别（UIPI）
+
+Windows 给每个进程一个完整性级别：`untrusted < low < medium < high < system < protected`。
+UIPI（User Interface Privilege Isolation）规定：**低级别进程不能把窗口消息、钩子、模拟输入投给高级别进程**，
+高打低没问题，低打高会被内核直接丢弃，表现就是"点了没反应"或 `ERROR_ACCESS_DENIED`。
+
+本工具的处理：
+
+- `status` 报自身的级别，`windows` / `info` 报目标的级别（如 `high (0x3000)`）。
+- 动作前先比较：低于目标就直接返回 `ELEVATION_MISMATCH`，附上两边的级别和目标进程，
+  不会让动作"静默失败"。
+- `desk elevate -- <命令>`：以管理员身份重新执行同一条命令（弹一次 UAC），
+  结果通过临时文件带回并原样返回。
+
+彻底解决只有三条路：
+
+1. **让 DSH / 终端以管理员身份运行**——最简单，之后所有命令天然同级。
+2. **只在个别目标上提权**——用 `desk elevate -- ...` 包一层。
+3. **protected / PPL 进程**（杀软、反作弊等）用户态无法投递，也别想着注入 DLL 或关掉 UIPI，
+   那是降低整机安全，不是解决问题；这类目标只能走它自己的官方接口。
+
 ## 已知边界
 
 - **Chromium / Electron 的网页内容**：投递鼠标消息通常进不去（它只看真实输入），

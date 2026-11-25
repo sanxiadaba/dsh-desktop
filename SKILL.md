@@ -161,6 +161,7 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 | `NO_PATTERN` | 该元素没有这个 UIA 动作 | 换动作（`select`/`toggle`）或加 `--mode bg` |
 | `BG_DELIVER_FAILED` | 目标不处理投递的消息 | 目标可能挂起，或它在 DirectX/UIPI 环境里 |
 | `WINDOW_GONE` | 窗口已关闭 | 重新 `windows` 找 |
+| `ELEVATION_MISMATCH` | 目标完整性比你高，UIPI 会拦消息 | 用管理员运行 DSH，或 `desk elevate -- <同样的命令>` |
 | `WAIT_TIMEOUT` | 等待条件没出现 | 加大 `--timeout-ms`；先确认程序真的在执行 |
 
 `retry` 字段：`safe` 表示动作肯定没落地，可以重试；`unsafe` 表示可能已经生效，

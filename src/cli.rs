@@ -148,6 +148,7 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
   wait     --title <文本> [--exe <名>] [--timeout-ms N]
   wait     --window <id> [--text <文本> | --element <role:名字>] [--timeout-ms N]
   guard    --seconds N [--window <id>|--exe <名>]   临时钉住前台：程序自己跳出来就压回去
+  elevate  -- <命令...>                 以管理员身份执行一条命令（目标完整性更高时用）
   run      -                             从 stdin 读 {"steps":[["click","@s1:e3"], ...]}
   selftest                               自测：自己开窗验证注入，不碰你的桌面
   help [命令]                            本帮助
@@ -175,6 +176,9 @@ pub fn help_for(cmd: &str) -> &'static str {
         }
         "selftest" => {
             "desk selftest\n不依赖外部程序：自己建一个不抢前台的窗口，验证鼠标/键盘/滚轮注入、窗口枚举和截图。"
+        }
+        "elevate" => {
+            "desk elevate -- <命令...>\n当目标进程完整性级别更高、UIPI 会拦住消息时，用管理员身份重新执行同一条命令。\n会弹一次 UAC 确认；结果通过临时文件带回并原样返回。"
         }
         _ => HELP_MAIN,
     }
