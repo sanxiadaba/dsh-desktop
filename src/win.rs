@@ -1,0 +1,274 @@
+//! 窗口层：枚举、身份、几何、DPI、窗口管理。
+
+use crate::error::{DeskError, Result};
+use serde::{Deserialize, Serialize};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+};
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GWL_EXSTYLE, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow,
+    GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, WS_EX_TOOLWINDOW,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Rect {
+    pub fn center(&self) -> (i32, i32) {
+        (self.x + self.width / 2, self.y + self.height / 2)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.width <= 0 || self.height <= 0
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowInfo {
+    /// 稳定 id：`w-<hwnd 十六进制>`，窗口存活期间跨调用不变。
+    pub id: String,
+    pub hwnd: u64,
+    pub pid: u32,
+    pub exe: String,
+    pub class: String,
+    pub title: String,
+    pub rect: Rect,
+    pub dpi: u32,
+    pub minimized: bool,
+    pub visible: bool,
+    pub focused: bool,
+    pub elevated: bool,
+}
+
+pub fn window_id(hwnd: HWND) -> String {
+    format!("w-{:x}", hwnd.0 as usize)
+}
+
+pub fn parse_window_id(id: &str) -> Result<HWND> {
+    let raw = id.strip_prefix("w-").ok_or_else(|| {
+        DeskError::new("BAD_WINDOW_ID", format!("窗口 id 格式不对：{id}"))
+            .with_suggestion("id 形如 w-1a2b3c，用 `desk windows` 查看")
+    })?;
+    let v = u64::from_str_radix(raw, 16)
+        .map_err(|_| DeskError::new("BAD_WINDOW_ID", format!("窗口 id 不是十六进制：{id}")))?;
+    let hwnd = HWND(v as usize as *mut _);
+    if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
+        return Err(
+            DeskError::new("WINDOW_GONE", format!("窗口已不存在：{id}"))
+                .with_suggestion("重新运行 `desk windows` 取最新 id"),
+        );
+    }
+    Ok(hwnd)
+}
+
+pub fn enum_windows() -> Vec<WindowInfo> {
+    let mut out: Vec<WindowInfo> = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_proc),
+            LPARAM(&mut out as *mut Vec<WindowInfo> as isize),
+        );
+    }
+    out
+}
+
+unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let out = unsafe { &mut *(lparam.0 as *mut Vec<WindowInfo>) };
+    if let Some(info) = unsafe { describe(hwnd, false) } {
+        out.push(info);
+    }
+    BOOL(1)
+}
+
+/// 读取一个窗口的完整描述。`include_invisible` 为 false 时跳过不可见、
+/// 被 DWM 隐藏、以及只有 owner 的工具窗口。
+pub unsafe fn describe(hwnd: HWND, include_invisible: bool) -> Option<WindowInfo> {
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return None;
+        }
+        let visible = IsWindowVisible(hwnd).as_bool();
+        if !visible && !include_invisible {
+            return None;
+        }
+        // DWM 隐藏的窗口（例如挂在另一虚拟桌面上的 UWP）不参与交互。
+        let mut cloaked: u32 = 0;
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        if hr.is_ok() && cloaked != 0 && !include_invisible {
+            return None;
+        }
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex_style & WS_EX_TOOLWINDOW.0) != 0 && !include_invisible {
+            return None;
+        }
+
+        let title = window_title(hwnd);
+        let class = window_class(hwnd);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
+        let owner = GetWindow(hwnd, GW_OWNER).ok();
+        if !include_invisible && title.is_empty() && owner.is_some() {
+            return None;
+        }
+
+        Some(WindowInfo {
+            id: window_id(hwnd),
+            hwnd: hwnd.0 as usize as u64,
+            pid,
+            exe: exe_name(pid),
+            class,
+            title,
+            rect: window_rect(hwnd),
+            dpi: GetDpiForWindow(hwnd),
+            minimized: IsIconic(hwnd).as_bool(),
+            visible,
+            focused: GetForegroundWindow() == hwnd,
+            elevated: is_elevated(pid),
+        })
+    }
+}
+
+pub fn window_title(hwnd: HWND) -> String {
+    unsafe {
+        let len = GetWindowTextLengthW(hwnd);
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let n = GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+}
+
+pub fn window_class(hwnd: HWND) -> String {
+    unsafe {
+        let mut buf = [0u16; 256];
+        let n = GetClassNameW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+}
+
+/// 窗口真实可见矩形：优先 DWM 扩展边框（去掉 Win10 的隐形阴影边），
+/// 失败时退回 GetWindowRect。
+pub fn window_rect(hwnd: HWND) -> Rect {
+    unsafe {
+        let mut r = RECT::default();
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        );
+        if hr.is_ok() {
+            let rect = Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            };
+            if !rect.is_empty() {
+                return rect;
+            }
+        }
+        let mut r = RECT::default();
+        if GetWindowRect(hwnd, &mut r).is_ok() {
+            Rect {
+                x: r.left,
+                y: r.top,
+                width: r.right - r.left,
+                height: r.bottom - r.top,
+            }
+        } else {
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            }
+        }
+    }
+}
+
+/// 屏幕坐标 → 窗口客户区坐标。
+pub fn screen_to_client(hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
+    let mut p = windows::Win32::Foundation::POINT { x, y };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut p);
+    }
+    (p.x, p.y)
+}
+
+pub fn client_to_screen(hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
+    let mut p = windows::Win32::Foundation::POINT { x, y };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut p);
+    }
+    (p.x, p.y)
+}
+
+pub fn exe_name(pid: u32) -> String {
+    if pid == 0 {
+        return String::new();
+    }
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(h);
+        if ok.is_ok() {
+            let full = String::from_utf16_lossy(&buf[..size as usize]);
+            return full.rsplit(['\\', '/']).next().unwrap_or(&full).to_string();
+        }
+        String::new()
+    }
+}
+
+pub fn is_elevated(pid: u32) -> bool {
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut token = HANDLE::default();
+        let ok = OpenProcessToken(h, windows::Win32::Security::TOKEN_QUERY, &mut token);
+        let _ = CloseHandle(h);
+        if ok.is_err() {
+            return false;
+        }
+        let mut info = windows::Win32::Security::TOKEN_ELEVATION::default();
+        let mut ret = 0u32;
+        let ok = windows::Win32::Security::GetTokenInformation(
+            token,
+            windows::Win32::Security::TokenElevation,
+            Some(&mut info as *mut _ as *mut _),
+            std::mem::size_of::<windows::Win32::Security::TOKEN_ELEVATION>() as u32,
+            &mut ret,
+        );
+        let _ = CloseHandle(token);
+        ok.is_ok() && info.TokenIsElevated != 0
+    }
+}
