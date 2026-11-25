@@ -378,9 +378,14 @@ impl Uia {
     }
 
     /// 按快照路径取元素；身份对不上就返回 None（由调用方回退到 locate）。
-    pub fn element_at_path_cached(&self, hwnd: HWND, node: &Node) -> Option<IUIAutomationElement> {
+    pub fn element_at_path_cached(
+        &self,
+        hwnd: HWND,
+        node: &Node,
+        raw_view: bool,
+    ) -> Option<IUIAutomationElement> {
         let root = self.element_from_handle(hwnd).ok()?;
-        let walker = self.walker(false).ok()?;
+        let walker = self.walker(raw_view).ok()?;
         let mut cur = root;
         for step in &node.path {
             let mut child = unsafe { walker.GetFirstChildElement(&cur) }.ok()?;
@@ -425,6 +430,14 @@ impl Uia {
         unsafe { el.CurrentAutomationId() }
             .map(|b| b.to_string())
             .unwrap_or_default()
+    }
+
+    /// 元素当前的屏幕矩形（拿不到就 None）。
+    pub fn rect_of(&self, el: &IUIAutomationElement) -> Option<crate::win::Rect> {
+        unsafe { el.CurrentBoundingRectangle() }
+            .ok()
+            .map(rect_from)
+            .filter(|r| !r.is_empty())
     }
 
     pub fn value_of(&self, el: &IUIAutomationElement) -> Option<String> {

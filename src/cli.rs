@@ -63,24 +63,6 @@ impl Args {
                 .map_err(|_| DeskError::new("BAD_ARGS", format!("{name} 需要一个整数，收到：{v}"))),
         }
     }
-
-    /// 拒绝未知的 `--` 选项，避免拼错被静默忽略。
-    pub fn reject_unknown(&self, known: &[&str]) -> Result<()> {
-        for a in &self.raw {
-            if !a.starts_with("--") {
-                continue;
-            }
-            let name = a.split('=').next().unwrap_or(a);
-            if name == "--help" {
-                continue;
-            }
-            if !known.contains(&name) {
-                return Err(DeskError::new("BAD_ARGS", format!("未知选项：{name}"))
-                    .with_suggestion(format!("可用选项：{}", known.join(" "))));
-            }
-        }
-        Ok(())
-    }
 }
 
 fn takes_value(flag: &str) -> bool {
@@ -108,6 +90,83 @@ fn takes_value(flag: &str) -> bool {
     )
 }
 
+/// 所有接受值的选项。放在一处，解析位置参数和校验都靠它。
+pub const VALUE_FLAGS: &[&str] = &[
+    "--window",
+    "--depth",
+    "--limit",
+    "--out",
+    "--mode",
+    "--ref",
+    "--xy",
+    "--timeout-ms",
+    "--amount",
+    "--delta",
+    "--method",
+    "--name",
+    "--text",
+    "--element",
+    "--sel",
+    "--title",
+    "--exe",
+    "--dir",
+    "--seconds",
+];
+
+/// 纯开关。
+pub const BOOL_FLAGS: &[&str] = &[
+    "--all",
+    "--actionable",
+    "--raw",
+    "--verify",
+    "--screen",
+    "--json",
+    "--help",
+];
+
+impl Args {
+    /// 全局校验：未知选项、需要值却没给值，都在这里挡住。
+    /// 这一步是为了消灭"拼错选项 → 静默回落到前台窗口"这类误伤。
+    pub fn validate(&self) -> Result<()> {
+        let mut i = 0;
+        while i < self.raw.len() {
+            let a = &self.raw[i];
+            if a == "--" {
+                i += 1;
+                continue;
+            }
+            if !a.starts_with("--") {
+                i += 1;
+                continue;
+            }
+            let (name, has_value) = match a.split_once('=') {
+                Some((n, _)) => (n, true),
+                None => (a.as_str(), false),
+            };
+            if BOOL_FLAGS.contains(&name) {
+                i += 1;
+                continue;
+            }
+            if !VALUE_FLAGS.contains(&name) {
+                return Err(DeskError::new("BAD_ARGS", format!("未知选项：{name}"))
+                    .with_suggestion("desk help 查看可用选项"));
+            }
+            if has_value {
+                i += 1;
+                continue;
+            }
+            match self.raw.get(i + 1) {
+                Some(v) if !v.starts_with("--") => i += 2,
+                _ => {
+                    return Err(DeskError::new("BAD_ARGS", format!("选项 {name} 缺少值"))
+                        .with_suggestion(format!("例如 {name} <值>"))
+                        .with_details(serde_json::json!({ "option": name })));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义动作 / 后台注入）
 
 本工具不做物理输入：不发 SendInput、不移动光标、不把窗口切到前台。动作只走两条路——UIA 语义，或向目标窗口投递消息。
@@ -115,15 +174,15 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
 观察
   windows  [--all]                      列出窗口（默认只要标题非空、非本进程的）
   status                                环境、完整性级别、前台窗口
-  snap     [--window <id>] [--depth N] [--limit N] [--raw]
-           [--actionable] [--name 文本]  读 UIA 树，输出带 @ref 的元素；默认前台窗口
+  snap     --window <id> [--depth N] [--limit N] [--raw]
+           [--actionable] [--name 文本]  读 UIA 树，输出带 @ref 的元素（必须给 --window）
   find     <role:名字> [--window <id>]   在树里找元素（等于 snap + 过滤）
   info     <@ref>                        单个元素的完整信息（含 native_hwnd）
-  shot     [--window <id>] [--out 路径] [--screen]
+  shot     --window <id> [--out 路径] | --screen
                                          截图 PNG；窗口被遮挡也能拍
 
 动作（全部在后台完成）
-  click    <@ref> [--mode semantic|bg|physical] [--verify]
+  click    <@ref> [--mode semantic|bg] [--verify]
   rclick   <@ref>                        右键
   dclick   <@ref>                        双击
   select   <@ref>                        选中（页签、列表项、单选）
@@ -134,8 +193,8 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
   scroll   <@ref> <增量>                 或 --window <id> --xy X,Y
   wheel    --window <id> [--delta -120] [--xy X,Y]
   drag     "x1,y1" "x2,y2" [--window <id>]
-  key      <组合键> [--window <id>|--ref <@ref>] [--mode bg|physical]
-  type     <文本> [--window <id>|--ref <@ref>] [--method auto|value|keys|paste|physical]
+  key      <组合键> [--window <id>|--ref <@ref>]
+  type     <文本> [--window <id>|--ref <@ref>] [--method auto|value|keys|paste]
 
 窗口
   launch   <exe 或路径> [--dir 目录]

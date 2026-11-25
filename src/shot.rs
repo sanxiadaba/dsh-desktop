@@ -47,7 +47,7 @@ pub fn window(hwnd: HWND) -> Result<Image> {
     let off_x = (origin.x - win_rect.left).max(0);
     let off_y = (origin.y - win_rect.top).max(0);
 
-    let full = capture(hwnd, ww, wh, true)?;
+    let full = capture(hwnd, ww, wh, true, (off_x, off_y))?;
     Ok(crop(&full, off_x, off_y, cw, ch))
 }
 
@@ -70,20 +70,38 @@ fn crop(full: &Image, x: i32, y: i32, w: i32, h: i32) -> Image {
     }
 }
 pub fn screen() -> Result<Image> {
-    let (w, h) = unsafe {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+    let (x, y, w, h) = unsafe {
         (
-            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN,
-            ),
-            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-                windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN,
-            ),
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_XVIRTUALSCREEN),
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_YVIRTUALSCREEN),
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(SM_CYVIRTUALSCREEN),
         )
     };
-    capture(HWND::default(), w, h, false)
+    // 屏幕 DC 的 (0,0) 就是虚拟桌面左上角，所以 BitBlt 起点要减掉虚拟原点。
+    capture_at(HWND::default(), w, h, false, (-x, -y))
 }
 
-fn capture(hwnd: HWND, w: i32, h: i32, want_print_window: bool) -> Result<Image> {
+fn capture(
+    hwnd: HWND,
+    w: i32,
+    h: i32,
+    want_print_window: bool,
+    blit_offset: (i32, i32),
+) -> Result<Image> {
+    capture_at(hwnd, w, h, want_print_window, blit_offset)
+}
+
+fn capture_at(
+    hwnd: HWND,
+    w: i32,
+    h: i32,
+    want_print_window: bool,
+    blit_at: (i32, i32),
+) -> Result<Image> {
     unsafe {
         let src_dc = if hwnd.is_invalid() {
             GetDC(None)
@@ -103,7 +121,18 @@ fn capture(hwnd: HWND, w: i32, h: i32, want_print_window: bool) -> Result<Image>
             printed = PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(2)).as_bool();
         }
         if !printed {
-            let _ = BitBlt(mem_dc, 0, 0, w, h, Some(src_dc), 0, 0, SRCCOPY);
+            // GetDC(hwnd) 给的是客户区 DC，客户区在整窗里有偏移，必须贴到对应位置。
+            let _ = BitBlt(
+                mem_dc,
+                blit_at.0,
+                blit_at.1,
+                w,
+                h,
+                Some(src_dc),
+                0,
+                0,
+                SRCCOPY,
+            );
         }
 
         // 读回像素：BITMAPINFO 里给负高度，得到自顶向下的 BGRA。
@@ -114,7 +143,14 @@ fn capture(hwnd: HWND, w: i32, h: i32, want_print_window: bool) -> Result<Image>
         bi.bmiHeader.biPlanes = 1;
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB.0;
-        let mut buf = vec![0u8; (w * h * 4) as usize];
+        let bytes = (w as u64)
+            .checked_mul(h as u64)
+            .and_then(|v| v.checked_mul(4))
+            .filter(|v| *v <= 512 * 1024 * 1024)
+            .ok_or_else(|| {
+                DeskError::new("SHOT_FAILED", "窗口尺寸过大，拒绝截图（上限 512 MB）")
+            })?;
+        let mut buf = vec![0u8; bytes as usize];
         let got = GetDIBits(
             mem_dc,
             bmp,

@@ -24,13 +24,6 @@ fn args_positionals_skip_option_values() {
 }
 
 #[test]
-fn args_rejects_unknown_option() {
-    let a = Args::new(&argv(&["--windwo", "w-1"]));
-    let err = a.reject_unknown(&["--window"]).unwrap_err();
-    assert_eq!(err.code, "BAD_ARGS");
-}
-
-#[test]
 fn key_combo_parses_modifiers_and_key() {
     let (mods, vk) = input::parse_combo("ctrl+shift+s").unwrap();
     assert_eq!(vk, 'S' as u16);
@@ -133,4 +126,54 @@ fn rect_center_and_empty() {
 fn window_id_roundtrip_is_stable_format() {
     // 只验证格式，不碰真实窗口
     assert_eq!(format!("w-{:x}", 0x1a2bu64), "w-1a2b");
+}
+
+#[test]
+fn validate_accepts_double_dash_and_rejects_unknown() {
+    use crate::cli::Args;
+    let ok = Args::new(&argv(&["--", "click", "@s1:e3"]));
+    assert!(ok.validate().is_ok(), "-- 应该被当作分隔符");
+    let missing = Args::new(&["--window".to_string()]);
+    assert_eq!(missing.validate().unwrap_err().code, "BAD_ARGS");
+    let unknown = Args::new(&["--windw".to_string(), "w-1".to_string()]);
+    assert_eq!(unknown.validate().unwrap_err().code, "BAD_ARGS");
+    let eq = Args::new(&["--depth=7".to_string()]);
+    assert!(eq.validate().is_ok());
+}
+
+#[test]
+fn new_id_is_unique_without_sleep() {
+    use std::collections::HashSet;
+    let ids: HashSet<String> = (0..10_000).map(|_| crate::store::new_id()).collect();
+    assert_eq!(ids.len(), 10_000);
+}
+
+#[test]
+fn every_role_token_is_a_selector() {
+    for t in 50000..=50040 {
+        let token = crate::uia::role_name(t);
+        assert!(
+            crate::is_role(token),
+            "role_name({t}) = {token} 不能用于选择器"
+        );
+    }
+}
+
+#[test]
+fn removed_features_stay_removed() {
+    assert_eq!(
+        crate::act::parse_mode("physical").err().unwrap().code,
+        "BAD_ARGS"
+    );
+    let err = crate::run(&["focus".to_string(), "w-1".to_string()]).unwrap_err();
+    assert_eq!(err.code, "DISABLED");
+}
+
+#[test]
+fn snapshot_ids_must_be_safe() {
+    assert!(crate::store::is_valid_sid("s1a2b3c4d5"));
+    assert!(!crate::store::is_valid_sid("s1a2b3c4d5e6f7g8h9i0j1k2l3"));
+    assert!(!crate::store::is_valid_sid("../x"));
+    assert!(!crate::store::is_valid_sid("s..\\x"));
+    assert!(!crate::store::is_valid_sid("x123"));
 }

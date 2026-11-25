@@ -50,24 +50,31 @@ if (-not (Test-Path $desk)) { throw "desk.exe 不存在，先运行 $env:USERPRO
 ## 主循环
 
 ```powershell
-# 1. 找窗口
-& $desk windows | ConvertFrom-Json   # 看 id / exe / title / rect / minimized
+# 1. 找窗口（字段在 .data 里）
+$wins = (& $desk windows | ConvertFrom-Json).data
+$win  = $wins | Where-Object { $_.title -like '*记事本*' } | Select-Object -First 1
+$win.id, $win.title
 
-# 2. 读界面（只保留可操作元素，省 token）
-$s = & $desk snap --window w-306bc --actionable | ConvertFrom-Json
+# 2. 读界面（默认 limit 300，截断时 truncated=true）
+$s = & $desk snap --window $win.id --actionable | ConvertFrom-Json
+$s.data.truncated
 $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSize
 
-# 3. 动手
-& $desk click '@s1a2b:e7' | ConvertFrom-Json
+# 3. 动手（ref 必须来自本次输出）
+$ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object -First 1).ref
+& $desk click $ref --window $win.id | ConvertFrom-Json
 
 # 4. 验证
-& $desk snap --window w-306bc --actionable --name 保存 | ConvertFrom-Json
+& $desk snap --window $win.id --actionable --name 保存 | ConvertFrom-Json
 ```
+
+> **所有动作类命令都必须显式给 `--window` 或 `--ref`**，工具不会默认操作前台窗口。
+> 输出是紧凑 JSON（一行），需要人看时加 `--pretty`。
 
 `snap` 的输出是扁平列表，`depth` 表示层级：
 
 ```json
-{"ref":"@s1a2b:e7","role":"button","name":"应用设置","depth":3,
+{"ref":"@smwvx9pfk:e7","role":"button","name":"应用设置","depth":3,
  "actions":["click"],"rect":{"x":820,"y":430,"w":96,"h":30}}
 ```
 
@@ -93,32 +100,32 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 
 ```powershell
 & $desk click  '@s1:e7'                  # 语义优先 → 后台注入兜底
-& $desk click  '@s1:e7' --mode bg        # 强制后台注入（不动光标）
+& $desk click  '@s1:e7' --window w-1234 --mode bg   # 强制后台注入（不动光标）
 & $desk click  '@s1:e7' --verify         # 动作后自动重新读一次状态
-& $desk toggle '@s1:e9'                  # 勾选框
-& $desk set    '@s1:e4' "C:\temp\a.hex"  # 输入框直接赋值
-& $desk scrollitem '@s1:e120'            # 滚进可见区
+& $desk toggle '@s1:e9' --window w-1234   # 勾选框
+& $desk set    '@s1:e4' "C:\temp\a.hex" --window w-1234   # 直接赋值，返回 value_matches
+& $desk scrollitem '@s1:e120' --window w-1234   # 滚进可见区
 
 ```
 
 键盘与文本，默认打给**目标窗口里真正有焦点的子控件**，不要求窗口在前台：
 
 ```powershell
-& $desk key  "ctrl+s" --window w-306bc
+& $desk key  "ctrl+s" --window $win.id   # best-effort：少数程序不认投递的快捷键
 & $desk key  "enter"  --ref '@s1:e7'
-& $desk type "hello 中文" --window w-306bc        # 逐字 WM_CHAR，ASCII 和中文都行
-& $desk type "中文" --window w-306bc --method value --ref '@s1:e4'   # 直接写值，最稳
-& $desk type "中文" --window w-306bc --method paste  # 只在目标不认 WM_CHAR 时用
+& $desk type "hello 中文" --window $win.id        # 逐字 WM_CHAR，ASCII 和中文都行
+& $desk type "中文" --ref '@s1:e4' --window $win.id --method value   # 直接写值，最稳
+& $desk type "中文" --window $win.id --method paste  # 只在目标不认 WM_CHAR 时用（剪贴板会恢复）
 ```
 
 鼠标：`scroll`、`wheel`、`drag`、`rclick`、`dclick` 都是后台注入，
 坐标既可以是元素 ref，也可以是窗口内坐标。
 
 ```powershell
-& $desk rclick '@s1:e7'                  # 右键（上下文菜单）
-& $desk dclick '@s1:e12'                 # 双击（会补 WM_LBUTTONDBLCLK）
-& $desk scroll --window w-306bc --delta -360
-& $desk drag "100,200" "400,200" --window w-306bc
+& $desk rclick '@s1:e7' --window w-1234   # 右键（上下文菜单）
+& $desk dclick '@s1:e12' --window w-1234  # 双击（会补 WM_LBUTTONDBLCLK）
+& $desk scroll --window $win.id --delta -360
+& $desk drag "100,200" "400,200" --window $win.id
 ```
 
 ## 窗口
@@ -126,11 +133,11 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 ```powershell
 & $desk launch "C:\Windows\System32\notepad.exe"
 & $desk wait --title "记事本" --timeout-ms 8000     # 等窗口出现，返回 id
-& $desk move   w-306bc 100 80
-& $desk resize w-306bc 1200 800
-& $desk minimize w-306bc
-& $desk restore  w-306bc
-& $desk close    w-306bc
+& $desk move   $win.id 100 80
+& $desk resize $win.id 1200 800
+& $desk minimize $win.id
+& $desk restore  $win.id
+& $desk close    $win.id
 ```
 
 `restore` 只恢复不激活；工具里没有把窗口切到前台的命令。
@@ -138,11 +145,11 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 ## 观察别的形式
 
 ```powershell
-& $desk shot --window w-306bc --out C:\temp\ui.png   # 被遮挡的窗口也能拍到
+& $desk shot --window $win.id --out C:\temp\ui.png   # 客户区 1:1，被遮挡也能拍
 & $desk shot --screen 0 --out C:\temp\screen.png     # 整屏
 & $desk info '@s1:e7'                                # 单个元素的完整信息
-& $desk wait --window w-306bc --text "完成" --timeout-ms 15000
-& $desk wait --window w-306bc --element "button:保存" --timeout-ms 15000
+& $desk wait --window $win.id --text "完成" --timeout-ms 15000   # 标题或界面文本
+& $desk wait --window $win.id --element "button:保存" --timeout-ms 15000
 ```
 
 读不到 UIA 的程序（自绘界面、游戏、部分 Electron 页面）只能靠截图自己看：
@@ -158,7 +165,7 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
   ["click","@s1:e7"],
   ["set","@s1:e4","C:\\firmware.hex"],
   ["click","@s1:e9"],
-  ["wait","--window","w-306bc","--text","成功","--timeout-ms","20000"]
+  ["wait","--window","w-1234","--text","成功","--timeout-ms","20000"]
 ]}
 '@ | & $desk run -
 ```
@@ -177,6 +184,15 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 | `WINDOW_GONE` | 窗口已关闭 | 重新 `windows` 找 |
 | `ELEVATION_MISMATCH` | 目标完整性比你高，UIPI 会拦消息 | 用管理员运行 DSH，或 `desk elevate -- <同样的命令>` |
 | `WAIT_TIMEOUT` | 等待条件没出现 | 加大 `--timeout-ms`；先确认程序真的在执行 |
+| `NEED_ADMIN` | 当前不是管理员 | 用管理员启动 DSH/终端，或 `desk elevate -- ...` |
+| `BAD_ARGS` | 参数/选项不对（含拼错、缺值） | 按 `desk help` 改；动作类命令必须给 `--window`/`--ref` |
+| `BAD_REF` | ref 格式不对或快照 id 非法 | ref 必须来自本次 `desk snap` |
+| `BAD_WINDOW_ID` | 窗口 id 格式不对 | 形如 `w-1a2b3c` |
+| `SNAPSHOT_NOT_FOUND` | 快照被清理（只保留最近 30 份） | 重新 `desk snap`；`wait`/`--verify` 不落盘 |
+| `ACTION_FAILED` | UIA 动作本身失败 | 换动作或 `--mode bg` |
+| `TARGET_PROTECTED` | 读不到目标进程令牌（PPL/受保护进程） | 无法自动化，走官方接口 |
+| `ELEVATE_FAILED` / `ELEVATE_TIMEOUT` / `ELEVATED_COMMAND_FAILED` | 提权执行失败/超时/子命令失败 | 看 `details.result` |
+| `DISABLED` | 命令已禁用（如 `focus`） | 用后台动作 |
 
 `retry` 字段：`safe` 表示动作肯定没落地，可以重试；`unsafe` 表示可能已经生效，
 **先重新读状态再决定**，不要盲目重试（会点两次）。

@@ -26,10 +26,10 @@ Qt 程序、Win32 自绘界面、把控件拆成子 HWND 的上位机，恰好�
 
 设计细节：
 
-- **快照是扁平的**（带 `depth`），同样一棵树比嵌套 JSON 省一半 token。
+- **快照是扁平的**（带 `depth`），输出是紧凑 JSON（`--pretty` 可读）；默认 `limit 300`，截断时 `truncated:true`。`n- 快照只保留最近 30 份；`wait` 和 `--verify` 不落盘，不会挤掉你的 ref。
 - **元素身份 = 路径 +（角色、名字、automation_id、矩形）**，窗口里有两个「打开」按钮也能精确定位。
 - **属性走 UIA CacheRequest**，一个元素一次跨进程调用。Qt 窗口 130 个元素约 30 ms。
-- **语义动作会回读验证**：`select`/`toggle` 读完状态、列表项的 `invoke` 读选中态；
+- **每个动作后的回读验证**：`select`/`toggle` 读状态、列表项 `invoke` 读选中态、`set` 返回 `value_matches`；
   程序收了没反应就自动退回后台点击，结果里的 `mode` 会写成 `semantic:*` 或 `bg:*-fallback`。
 - **后台点击会做客户区边界检查**：元素滚出视口时直接报 `POINT_OUTSIDE`，不会静默点空。
 - **消息投给坐标下最深的子窗口**：经典 Win32 程序把页签/工具条做成子 HWND，投给顶层窗口等于没点。
@@ -60,10 +60,10 @@ New-Item -ItemType Junction -Path "$env:USERPROFILE\.dsh\skills\desktop" -Target
 $desk = "$env:USERPROFILE\.dsh\skills\desktop\desk.exe"
 
 & $desk windows                        # 有哪些窗口
-& $desk snap --window w-306bc --actionable   # 读界面，拿 @ref
-& $desk click '@s1a2b:e7'              # 语义优先，走不通自动后台注入
-& $desk type "hello" --window w-306bc  # 后台打字，不抢前台
-& $desk shot --window w-306bc --out C:\temp\a.png
+& $desk snap --window w-1234 --actionable   # 读界面，拿 @ref
+& $desk click '@smwvx9pfk:e7' --window w-1234   # 语义优先，走不通自动后台注入
+& $desk type "hello" --window w-1234  # 后台打字，不抢前台
+& $desk shot --window w-1234 --out C:\temp\a.png
 & $desk selftest                       # 自测，不需要任何外部程序
 ```
 
@@ -122,7 +122,7 @@ UIPI（User Interface Privilege Isolation）规定：**低级别进程不能把�
   这类目标应该用 CDP（`edge-browser` 技能）。
 - **最小化窗口**：UIA 语义动作通常还能用；坐标点击不行（没有布局），先 `restore`。
 - **提权窗口**：本进程需要与目标同级或更高完整性，否则消息会被 UIPI 丢弃。
-- **输入法**：`type` 默认走 `WM_CHAR`，会绕过输入法；`--method paste` 会覆盖剪贴板。
+- **输入法**：`type` 默认走 `WM_CHAR`，会绕过输入法；`--method paste` 会临时占用剪贴板，命令结束会恢复原文本。`n- **`key` 是 best-effort**：投递的是窗口消息，不经过目标线程的 TranslateAccelerator，少数程序的快捷键可能不触发；文档与返回里的 `mode` 会说明走的是投递路径。
 - 只支持 Windows 10 1809+ / Windows 11。
 
 ## 开发
@@ -130,7 +130,7 @@ UIPI（User Interface Privilege Isolation）规定：**低级别进程不能把�
 ```powershell
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test                       # 10 个纯单元测试，不需要桌面
+cargo test                       # 18 个纯单元测试，不需要桌面
 & .\target\debug\desk.exe selftest   # 7 项，自己开窗验证消息注入，不碰你的桌面
 ```
 

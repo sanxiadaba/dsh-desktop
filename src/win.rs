@@ -58,6 +58,22 @@ pub fn window_id(hwnd: HWND) -> String {
     format!("w-{:x}", hwnd.0 as usize)
 }
 
+/// 本进程这次调用里碰到过的窗口（用于判断前台变化是不是我们造成的）。
+static TOUCHED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+pub fn touched_windows() -> Vec<usize> {
+    TOUCHED.lock().map(|v| v.clone()).unwrap_or_default()
+}
+
+fn remember(hwnd: HWND) {
+    if let Ok(mut list) = TOUCHED.lock() {
+        let v = hwnd.0 as usize;
+        if !list.contains(&v) {
+            list.push(v);
+        }
+    }
+}
+
 pub fn parse_window_id(id: &str) -> Result<HWND> {
     let raw = id.strip_prefix("w-").ok_or_else(|| {
         DeskError::new("BAD_WINDOW_ID", format!("窗口 id 格式不对：{id}"))
@@ -70,6 +86,7 @@ pub fn parse_window_id(id: &str) -> Result<HWND> {
         return Err(DeskError::new("WINDOW_GONE", format!("窗口已不存在：{id}"))
             .with_suggestion("重新运行 `desk windows` 取最新 id"));
     }
+    remember(hwnd);
     Ok(hwnd)
 }
 
@@ -341,6 +358,9 @@ pub fn can_reach(target_pid: u32) -> std::result::Result<(), (Option<u32>, Optio
     let them = integrity_rid(target_pid);
     match (me, them) {
         (Some(a), Some(b)) if a < b => Err((Some(a), Some(b))),
+        // 读不到目标进程的令牌：多半是受保护进程（PPL）。动作一律拒绝，
+        // 消息反正会被内核丢弃，放行只会"看起来成功"。
+        (None, _) | (_, None) => Err((me, them)),
         _ => Ok(()),
     }
 }

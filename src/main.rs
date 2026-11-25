@@ -29,6 +29,8 @@ fn main() {
     let fg0 = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
 
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    let pretty = argv.iter().any(|a| a == "--pretty");
+    argv.retain(|a| a != "--pretty");
     // 提权子进程用这个把自己那份 JSON 写回文件（跨 UAC 拿不到管道）。
     let mut result_file: Option<std::path::PathBuf> = None;
     if argv.len() >= 2 && argv[0] == "--result-file" {
@@ -58,7 +60,7 @@ fn main() {
                 "side_effects": { "foreground_restored": restored },
                 "data": data,
             });
-            emit(&envelope, result_file.as_deref());
+            emit(&envelope, result_file.as_deref(), pretty);
         }
         Err(e) => {
             let cmd = argv.first().cloned().unwrap_or_default();
@@ -71,7 +73,7 @@ fn main() {
                 "side_effects": { "foreground_restored": restored },
                 "error": e.to_json(),
             });
-            emit(&envelope, result_file.as_deref());
+            emit(&envelope, result_file.as_deref(), pretty);
             std::process::exit(1);
         }
     }
@@ -80,11 +82,17 @@ fn main() {
 /// 命令结束后把前台还原回去（guard 命令本身除外），返回是否真的还原了。
 fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-    if cmd == "guard" || fg0.0.is_null() {
+    // guard 自己就是管前台的；wait 可能跑很久，期间用户切窗不该被拉回来。
+    if matches!(cmd, "guard" | "wait") || fg0.0.is_null() {
         return false;
     }
     let fg = unsafe { GetForegroundWindow() };
     if fg == fg0 {
+        return false;
+    }
+    // 只有当前前台是我们这次真的碰过的窗口（目标程序把自己顶上来）才还原；
+    // 用户自己切到别的程序时不动他。
+    if !win::touched_windows().contains(&(fg.0 as usize)) {
         return false;
     }
     unsafe {
@@ -94,8 +102,12 @@ fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
     unsafe { GetForegroundWindow() == fg0 }
 }
 
-fn emit(envelope: &Value, file: Option<&std::path::Path>) {
-    let text = serde_json::to_string_pretty(envelope).unwrap_or_default();
+fn emit(envelope: &Value, file: Option<&std::path::Path>, pretty: bool) {
+    let text = if pretty {
+        serde_json::to_string_pretty(envelope).unwrap_or_default()
+    } else {
+        serde_json::to_string(envelope).unwrap_or_default()
+    };
     match file {
         Some(p) => {
             let _ = std::fs::write(p, text);
@@ -133,12 +145,13 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
     let Some(cmd) = argv.first().map(|s| s.as_str()) else {
         return Err(DeskError::new("BAD_ARGS", "缺少子命令").with_suggestion("desk help"));
     };
-    if !is_readonly(cmd) {
-        ensure_admin()?;
-    }
     let args = Args::new(&argv[1..]);
     if args.has("--help") {
         return Ok((cmd.to_string(), json!({ "help": cli::help_for(cmd) })));
+    }
+    args.validate()?;
+    if !is_readonly(cmd) {
+        ensure_admin()?;
     }
     match cmd {
         "help" => Ok(("help".into(), json!({ "help": cli::help_for("") }))),
@@ -192,7 +205,7 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
         }
         "key" => key_cmd(&args),
         "type" => type_cmd(&args),
-        "wheel" | "scroll" => {
+        "wheel" => {
             let hwnd = target_window(&args)?;
             let delta = args
                 .int("--delta")?
@@ -203,6 +216,31 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
                 None => window_center(hwnd)?,
             };
             Ok((cmd.into(), act::wheel(hwnd, x, y, delta)?))
+        }
+        "scroll" => {
+            // scroll <@ref> [增量]  或  scroll --window <id> [--xy x,y] [--delta N]
+            let r = args.positionals();
+            let delta = match r.get(1).and_then(|s| s.parse::<i32>().ok()) {
+                Some(v) => v,
+                None => args
+                    .int("--delta")?
+                    .or(args.int("--amount")?)
+                    .unwrap_or(-120) as i32,
+            };
+            match r.first() {
+                Some(ref_id) if ref_id.starts_with('@') => {
+                    let uia = Uia::new()?;
+                    Ok(("scroll".into(), act::scroll_ref(&uia, ref_id, delta)?))
+                }
+                _ => {
+                    let hwnd = target_window(&args)?;
+                    let (x, y) = match args.opt("--xy") {
+                        Some(s) => parse_xy(&s)?,
+                        None => window_center(hwnd)?,
+                    };
+                    Ok(("scroll".into(), act::wheel(hwnd, x, y, delta)?))
+                }
+            }
         }
         "drag" => {
             let r = args.positionals();
@@ -274,7 +312,6 @@ fn status() -> Result<Value> {
 }
 
 fn windows_cmd(args: &Args) -> Result<Value> {
-    args.reject_unknown(&["--all", "--json"])?;
     let mut all = win::enum_windows();
     if !args.has("--all") {
         all.retain(|w| !w.title.is_empty() && w.pid != std::process::id());
@@ -286,25 +323,16 @@ fn windows_cmd(args: &Args) -> Result<Value> {
 fn walk_options(args: &Args) -> Result<WalkOptions> {
     Ok(WalkOptions {
         max_depth: args.int("--depth")?.unwrap_or(16).max(1) as usize,
-        limit: args.int("--limit")?.unwrap_or(1200).max(1) as usize,
+        limit: args.int("--limit")?.unwrap_or(300).max(1) as usize,
         raw_view: args.has("--raw"),
     })
 }
 
 fn snap_cmd(args: &Args) -> Result<Value> {
-    args.reject_unknown(&[
-        "--window",
-        "--depth",
-        "--limit",
-        "--raw",
-        "--actionable",
-        "--name",
-        "--text",
-    ])?;
     let hwnd = target_window(args)?;
     let opts = walk_options(args)?;
     let uia = Uia::new()?;
-    let mut out = act::snap(&uia, hwnd, &opts)?;
+    let mut out = act::snap(&uia, hwnd, &opts, true)?;
     if args.has("--actionable") {
         filter_elements(&mut out, |e| {
             e.get("actions")
@@ -359,7 +387,6 @@ fn find_cmd(args: &Args) -> Result<Value> {
 }
 
 fn click_cmd(args: &Args) -> Result<(String, Value)> {
-    args.reject_unknown(&["--mode", "--verify", "--json"])?;
     let r = args.positionals();
     let ref_id = r.first().ok_or_else(|| need("<@ref>"))?;
     let mode = match args.opt("--mode") {
@@ -370,63 +397,34 @@ fn click_cmd(args: &Args) -> Result<(String, Value)> {
     let mut out = act::click(&uia, ref_id, mode)?;
 
     if args.has("--verify") {
-        std::thread::sleep(Duration::from_millis(250));
-        let hwnd = target_window(args).or_else(|_| {
-            let sid = ref_id
-                .trim_start_matches('@')
-                .split(':')
-                .next()
-                .unwrap_or("");
-            let snap = store::load(sid)?;
-            win::parse_window_id(&snap.window_id)
-        })?;
-        let before = act::snap(
-            &uia,
-            hwnd,
-            &WalkOptions {
-                max_depth: 12,
-                limit: 800,
-                raw_view: false,
-            },
-        )?;
-        out["verify"] = verify_ref(&before, ref_id);
+        // 验证必须针对被点的那个窗口：优先 --window，其次 ref 所在快照的窗口。
+        let hwnd = match args.opt("--window") {
+            Some(id) => win::parse_window_id(&id)?,
+            None => {
+                let sid = ref_id
+                    .trim_start_matches('@')
+                    .split(':')
+                    .next()
+                    .unwrap_or("");
+                let snap = store::load(sid)?;
+                win::parse_window_id(&snap.window_id)?
+            }
+        };
+        // 定向验证：直接用被点的那个 ref 重新解析，读几个状态属性即可，
+        // 不再整棵树重拍一遍（那会慢 300ms 还会挤掉快照）。
+        std::thread::sleep(Duration::from_millis(120));
+        let _ = hwnd;
+        out["verify"] = match act::resolve(&uia, ref_id) {
+            Ok(again) => json!({
+                "still_present": true,
+                "checked": uia.is_toggled(&again.element),
+                "selected": uia.is_selected(&again.element),
+                "value": uia.value_of(&again.element),
+            }),
+            Err(e) => json!({ "still_present": false, "error": e.code }),
+        };
     }
     Ok(("click".into(), out))
-}
-
-fn verify_ref(snapshot: &Value, ref_id: &str) -> Value {
-    let sid = ref_id
-        .trim_start_matches('@')
-        .split(':')
-        .next()
-        .unwrap_or("");
-    let Some(new_id) = snapshot.get("snapshot_id").and_then(|v| v.as_str()) else {
-        return json!({"found": Value::Null, "snapshot_id": sid});
-    };
-    let file = match store::load(new_id) {
-        Ok(f) => f,
-        Err(_) => return json!({"found": Value::Null, "snapshot_id": new_id}),
-    };
-    let old = store::load(sid).ok().and_then(|f| f.find(ref_id).cloned());
-    let Some(old) = old else {
-        return json!({"found": Value::Null, "snapshot_id": new_id});
-    };
-    let hit = file
-        .nodes
-        .iter()
-        .find(|n| n.role == old.role && n.name == old.name && n.automation_id == old.automation_id);
-    match hit {
-        Some(n) => json!({
-            "snapshot_id": new_id,
-            "found": true,
-            "ref": n.ref_id,
-            "checked": n.checked,
-            "selected": n.selected,
-            "value": n.value,
-            "focused": n.focused,
-        }),
-        None => json!({"snapshot_id": new_id, "found": false}),
-    }
 }
 
 fn key_cmd(args: &Args) -> Result<(String, Value)> {
@@ -441,13 +439,31 @@ fn key_cmd(args: &Args) -> Result<(String, Value)> {
 fn type_cmd(args: &Args) -> Result<(String, Value)> {
     let r = args.positionals();
     let text = r.first().ok_or_else(|| need("<文本>"))?;
+    if r.len() > 1 {
+        return Err(DeskError::new(
+            "BAD_ARGS",
+            "type 只接受一个文本参数；含空格请用引号包成一个参数",
+        )
+        .with_suggestion("例：desk type \"hello world\" --window w-1"));
+    }
     let method = args.opt("--method").unwrap_or_else(|| "auto".to_string());
     let hwnd = target_window(args)?;
     match method.as_str() {
         "paste" | "clipboard" => {
+            // 保存用户原来的剪贴板，粘完恢复；失败也不留下敏感文本。
+            let previous = clipboard::get_text().ok();
             clipboard::set_text(text)?;
             let key_hwnd = typing_hwnd(hwnd);
-            input::paste(key_hwnd)?;
+            let result = input::paste(key_hwnd);
+            match previous {
+                Some(prev) => {
+                    let _ = clipboard::set_text(&prev);
+                }
+                None => {
+                    let _ = clipboard::clear();
+                }
+            }
+            result?;
             Ok((
                 "type".into(),
                 json!({"mode": "paste", "chars": text.chars().count()}),
@@ -502,33 +518,110 @@ fn clipboard_cmd(args: &Args) -> Result<(String, Value)> {
 /// 有些上位机会定时自我激活，用这个压住。
 /// 以管理员身份重新执行同一条命令，并把结果带回来。
 /// 只在目标进程完整性更高（UIPI 会拦）时才需要。
+/// 按 CommandLineToArgvW 的规则给一个参数加引号。
+/// 简单加双引号会把 `C:\Program Files\` 这种以反斜杠结尾的路径改坏。
+fn quote_arg(a: &str) -> String {
+    if !a.is_empty() && !a.contains([' ', '\t', '"']) {
+        return a.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0usize;
+    for ch in a.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                out.push(ch);
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
+}
+
+fn known_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "status"
+            | "windows"
+            | "snap"
+            | "find"
+            | "info"
+            | "click"
+            | "rclick"
+            | "dclick"
+            | "select"
+            | "toggle"
+            | "set"
+            | "expand"
+            | "collapse"
+            | "scrollitem"
+            | "scrollinto"
+            | "scroll"
+            | "wheel"
+            | "drag"
+            | "key"
+            | "type"
+            | "shot"
+            | "clipboard"
+            | "wait"
+            | "guard"
+            | "minimize"
+            | "maximize"
+            | "restore"
+            | "close"
+            | "move"
+            | "resize"
+            | "launch"
+            | "selftest"
+    )
+}
+
 fn elevate_cmd(rest: &[String]) -> Result<Value> {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
+    use windows::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
     use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
-    let rest: Vec<String> = rest
-        .iter()
-        .filter(|a| a.as_str() != "--")
-        .cloned()
-        .collect();
-    if rest.is_empty() {
+    // 只剥掉第一个 `--`，其余原样传（`--` 本身也可能是合法参数值）。
+    let mut args: Vec<String> = rest.to_vec();
+    if args.first().map(|a| a == "--").unwrap_or(false) {
+        args.remove(0);
+    }
+    if args.is_empty() {
         return Err(need("<命令>").with_suggestion("例：desk elevate -- click @s1:e3"));
     }
+    // 先在提权之前校验命令名，免得弹了 UAC 才报错。
+    if !known_command(&args[0]) {
+        return Err(
+            DeskError::new("BAD_ARGS", format!("elevate 不支持这个子命令：{}", args[0]))
+                .with_suggestion("desk help 查看可用命令"),
+        );
+    }
+    if args.iter().any(|a| a.contains(['\t', '\r', '\n'])) {
+        return Err(DeskError::new("BAD_ARGS", "参数里不允许制表符或换行符"));
+    }
+
     let exe = std::env::current_exe()
         .map_err(|e| DeskError::new("ELEVATE_FAILED", format!("取自身路径失败：{e}")))?;
-    let out = state_dir().join(format!("elevated-{}.json", now_ms()));
-    let mut params = format!("--result-file \"{}\"", out.display());
-    for a in &rest {
+    let dir = state_dir();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| DeskError::new("ELEVATE_FAILED", format!("创建状态目录失败：{e}")))?;
+    let nonce = format!("{:x}{:x}", now_ms(), std::process::id());
+    let out = dir.join(format!("elevated-{nonce}.json"));
+
+    let mut params = format!("--result-file {}", quote_arg(&out.display().to_string()));
+    // child 用 --result-file 传回结果，再带上 --pretty 之外的原始参数
+    for a in &args {
         params.push(' ');
-        if a.contains(' ') || a.contains('"') {
-            params.push('"');
-            params.push_str(&a.replace('"', "\\\""));
-            params.push('"');
-        } else {
-            params.push_str(a);
-        }
+        params.push_str(&quote_arg(a));
     }
 
     let verb = windows::core::HSTRING::from("runas");
@@ -549,28 +642,58 @@ fn elevate_cmd(rest: &[String]) -> Result<Value> {
             format!("提权启动失败（UAC 被取消或策略禁止）：{e}"),
         )
     })?;
+
     let h = sei.hProcess;
-    if !h.is_invalid() {
-        unsafe {
-            WaitForSingleObject(h, INFINITE);
-            let _ = CloseHandle(h);
+    let timed_out = if !h.is_invalid() {
+        let wait = unsafe { WaitForSingleObject(h, 60_000) };
+        // WAIT_TIMEOUT = 0x102
+        if wait.0 == 0x102 {
+            let _ = unsafe { TerminateProcess(h, 1) };
+            true
+        } else {
+            false
         }
+    } else {
+        false
+    };
+    if !h.is_invalid() {
+        let _ = unsafe { CloseHandle(h) };
     }
-    let text = std::fs::read_to_string(&out).map_err(|e| {
+
+    let read = std::fs::read_to_string(&out);
+    let _ = std::fs::remove_file(&out);
+    if timed_out {
+        return Err(
+            DeskError::new("ELEVATE_TIMEOUT", "提权子进程 60 秒没有结束，已终止").delivered(),
+        );
+    }
+    let text = read.map_err(|e| {
+        // 子进程可能已经执行了动作，只是没写回结果：不能当成"安全可重试"。
         DeskError::new(
             "ELEVATE_FAILED",
             format!("提权进程没有留下结果（可能被取消）：{e}"),
         )
+        .delivered()
     })?;
-    let _ = std::fs::remove_file(&out);
-    let child: Value = serde_json::from_str(&text)
-        .map_err(|e| DeskError::new("ELEVATE_FAILED", format!("提权结果解析失败：{e}")))?;
-    Ok(json!({ "elevated": true, "result": child }))
+    if text.len() > 16 * 1024 * 1024 {
+        return Err(DeskError::new("ELEVATE_FAILED", "提权结果过大，已拒绝").delivered());
+    }
+    let child: Value = serde_json::from_str(&text).map_err(|e| {
+        DeskError::new("ELEVATE_FAILED", format!("提权结果解析失败：{e}")).delivered()
+    })?;
+    if child.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        Ok(json!({ "elevated": true, "result": child }))
+    } else {
+        Err(
+            DeskError::new("ELEVATED_COMMAND_FAILED", "提权执行的命令返回失败")
+                .with_details(json!({ "result": child }))
+                .delivered(),
+        )
+    }
 }
 
 fn guard_cmd(args: &Args) -> Result<Value> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-    args.reject_unknown(&["--seconds", "--window", "--exe"])?;
     let secs = args.int("--seconds")?.unwrap_or(30).max(1) as u64;
     let mut exe = args.opt("--exe");
     if exe.is_none()
@@ -616,15 +739,6 @@ fn guard_cmd(args: &Args) -> Result<Value> {
 }
 
 fn wait_cmd(args: &Args) -> Result<Value> {
-    args.reject_unknown(&[
-        "--window",
-        "--text",
-        "--element",
-        "--timeout-ms",
-        "--sel",
-        "--title",
-        "--exe",
-    ])?;
     let timeout = args.int("--timeout-ms")?.unwrap_or(10000).max(100) as u64;
     if let Some(title) = args.opt("--title") {
         let exe = args.opt("--exe");
@@ -663,9 +777,35 @@ fn wait_cmd(args: &Args) -> Result<Value> {
     let mut last_seen = Value::Null;
     loop {
         if let Some(t) = &text {
+            // 先看标题，再看界面文本（很多"完成/成功"只出现在界面里）。
             let title = win::window_title(hwnd);
             if title.contains(t.as_str()) {
-                return Ok(json!({"matched": "text", "value": title, "waited_ms": 0}));
+                return Ok(json!({ "matched": "title", "value": title }));
+            }
+            let uia = Uia::new()?;
+            let snap = act::snap(
+                &uia,
+                hwnd,
+                &WalkOptions {
+                    max_depth: 12,
+                    limit: 600,
+                    raw_view: false,
+                },
+                false,
+            )?;
+            let hit = snap
+                .get("elements")
+                .and_then(|e| e.as_array())
+                .and_then(|arr| {
+                    arr.iter().find(|e| {
+                        let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let value = e.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                        name.contains(t.as_str()) || value.contains(t.as_str())
+                    })
+                })
+                .cloned();
+            if let Some(el) = hit {
+                return Ok(json!({ "matched": "element", "element": el }));
             }
             last_seen = json!(title);
         }
@@ -676,7 +816,7 @@ fn wait_cmd(args: &Args) -> Result<Value> {
                 limit: 900,
                 raw_view: false,
             };
-            let snap = act::snap(&uia, hwnd, &opts)?;
+            let snap = act::snap(&uia, hwnd, &opts, false)?;
             let (role, name) = match sel.split_once(':') {
                 Some((r, n)) if is_role(r) => (Some(r), n),
                 _ => (None, sel.as_str()),
@@ -770,14 +910,11 @@ fn target_window(args: &Args) -> Result<HWND> {
             return win::parse_window_id(&snap.window_id);
         }
     }
-    {
-        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
-        let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.0.is_null() {
-            return Err(DeskError::new("NO_FOREGROUND", "当前没有前台窗口"));
-        }
-        Ok(hwnd)
-    }
+    Err(DeskError::new(
+        "BAD_ARGS",
+        "这个命令必须明确指定目标窗口：加 --window <id> 或 --ref <@ref>",
+    )
+    .with_suggestion("先 `desk windows` 拿 id，或 `desk snap` 拿 ref；工具不会默认操作前台窗口"))
 }
 
 fn window_center(hwnd: HWND) -> Result<(i32, i32)> {
@@ -802,7 +939,6 @@ fn parse_xy(s: &str) -> Result<(i32, i32)> {
 }
 
 fn shot_cmd(args: &Args) -> Result<Value> {
-    args.reject_unknown(&["--window", "--out", "--screen"])?;
     let img = if args.has("--screen") {
         shot::screen()?
     } else {
@@ -827,34 +963,31 @@ fn shot_cmd(args: &Args) -> Result<Value> {
 
 fn window_action(cmd: &str, args: &Args) -> Result<Value> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        SW_MAXIMIZE, SW_MINIMIZE, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, WM_CLOSE,
+        IsIconic, IsZoomed, SW_MAXIMIZE, SW_MINIMIZE, SW_SHOWNOACTIVATE, ShowWindow, WM_CLOSE,
     };
     let r = args.positionals();
     let id = r.first().ok_or_else(|| need("<窗口 id>"))?;
     let hwnd = win::parse_window_id(id)?;
     match cmd {
-        "focus" => {
-            let ok = unsafe { SetForegroundWindow(hwnd) }.as_bool();
-            Ok(json!({"id": id, "focused": ok, "note": "focus 会抢前台，只在必要时用"}))
-        }
         "minimize" => {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_MINIMIZE);
             }
-            Ok(json!({"id": id, "minimized": true}))
+            Ok(json!({"id": id, "minimized": unsafe { IsIconic(hwnd).as_bool() }}))
         }
         "maximize" => {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_MAXIMIZE);
             }
-            Ok(json!({"id": id, "maximized": true}))
+            Ok(json!({"id": id, "maximized": unsafe { IsZoomed(hwnd).as_bool() }}))
         }
         "restore" => {
             unsafe {
-                // SW_RESTORE 会抢前台；用 SW_SHOWNOACTIVATE 只恢复不激活。
+                // SW_RESTORE 会抢前台；SW_SHOWNOACTIVATE 只恢复不激活。
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            Ok(json!({"id": id, "restored": true}))
+            let minimized = unsafe { IsIconic(hwnd).as_bool() };
+            Ok(json!({"id": id, "restored": !minimized, "minimized": minimized}))
         }
         _ => {
             let ok = unsafe {
@@ -886,10 +1019,21 @@ fn window_geometry(cmd: &str, args: &Args) -> Result<Value> {
     let hwnd = win::parse_window_id(id)?;
     let info = unsafe { win::describe(hwnd, true) }
         .ok_or_else(|| DeskError::new("WINDOW_GONE", "目标窗口已消失"))?;
+    if info.minimized {
+        return Err(DeskError::new(
+            "WINDOW_MINIMIZED",
+            "窗口已最小化，先 restore 再 move/resize",
+        ));
+    }
+    // 用真正的窗口矩形：DWM 的可视矩形比 GetWindowRect 小一圈，
+    // 拿它当坐标会让窗口每 resize 一次就往右下漂、越缩越小。
+    let mut wr = windows::Win32::Foundation::RECT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut wr) }
+        .map_err(|e| DeskError::new("WINDOW_MOVE_FAILED", format!("读取窗口矩形失败：{e}")))?;
     let (x, y, w, h) = if cmd == "move" {
-        (a, b, info.rect.width, info.rect.height)
+        (a, b, wr.right - wr.left, wr.bottom - wr.top)
     } else {
-        (info.rect.x, info.rect.y, a, b)
+        (wr.left, wr.top, a, b)
     };
     unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) }
         .map_err(|e| DeskError::new("WINDOW_MOVE_FAILED", format!("移动/缩放窗口失败：{e}")))?;
@@ -928,6 +1072,10 @@ fn launch_cmd(args: &Args) -> Result<Value> {
 }
 
 fn is_role(s: &str) -> bool {
+    // 直接以 uia::role_name 为准，避免两处表漂移。
+    if (50000..=50040).any(|t| uia::role_name(t) == s) {
+        return true;
+    }
     matches!(
         s,
         "button"

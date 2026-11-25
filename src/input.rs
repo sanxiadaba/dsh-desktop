@@ -112,7 +112,7 @@ pub fn click_client(hwnd: HWND, cx: i32, cy: i32, button: Button) -> Result<()> 
             "BG_DELIVER_FAILED",
             "投递鼠标按下消息失败：目标窗口可能已挂起或拒绝消息",
         )
-        .with_suggestion("先用 `desk status` 确认窗口还在；必要时用 --mode physical")
+        .with_suggestion("先用 `desk status` 确认窗口还在、进程没挂起")
         .delivered());
     }
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -134,6 +134,9 @@ pub enum Button {
 
 /// 滚轮：`delta` 正数向上，负数向下（一格 120）。
 pub fn wheel_screen(hwnd: HWND, sx: i32, sy: i32, delta: i32) -> Result<()> {
+    // 滚轮必须投给坐标下最深的子窗口：WM_MOUSEWHEEL 不会被子控件收到，
+    // 投给顶层窗口时列表/编辑框会"滚不动"。
+    let hwnd = deepest_child(hwnd, sx, sy);
     // WM_MOUSEWHEEL 的坐标是屏幕坐标，不是客户区坐标。
     let lo = (sx as u32 & 0xffff) as isize;
     let hi = ((sy as u32 & 0xffff) as isize) << 16;
@@ -167,21 +170,44 @@ pub fn drag_client(hwnd: HWND, from: (i32, i32), to: (i32, i32), steps: u32) -> 
 
 pub fn key_combo(hwnd: HWND, combo: &str) -> Result<()> {
     let (mods, vk) = parse_combo(combo)?;
+    let mut ok = true;
     for m in &mods {
-        let _ = send(hwnd, WM_KEYDOWN, m.0 as usize, LPARAM(0));
+        ok &= send(hwnd, WM_KEYDOWN, m.0 as usize, LPARAM(0));
     }
-    send(hwnd, WM_KEYDOWN, vk as usize, LPARAM(0x0001_0001));
+    ok &= send(hwnd, WM_KEYDOWN, vk as usize, LPARAM(0x0001_0001));
     std::thread::sleep(std::time::Duration::from_millis(15));
-    send(hwnd, WM_KEYUP, vk as usize, LPARAM(0xC001_0001u32 as isize));
+    ok &= send(hwnd, WM_KEYUP, vk as usize, LPARAM(0xC001_0001u32 as isize));
     for m in mods.iter().rev() {
-        let _ = send(
+        ok &= send(
             hwnd,
             WM_KEYUP,
             m.0 as usize,
             LPARAM(0xC001_0001u32 as isize),
         );
     }
+    if !ok {
+        return Err(
+            DeskError::new("BG_DELIVER_FAILED", "组合键投递失败：目标窗口没有处理消息")
+                .with_suggestion("先用 `desk status` 确认窗口还在、进程没挂起")
+                .delivered(),
+        );
+    }
     Ok(())
+}
+
+/// 屏幕坐标双击：投给该点下最深的子窗口（与点击一致）。
+pub fn double_click_screen(hwnd: HWND, sx: i32, sy: i32) -> Result<()> {
+    let target = deepest_child(hwnd, sx, sy);
+    let (cx, cy) = screen_to_client(target, sx, sy);
+    double_click_client(target, cx, cy)
+}
+
+/// 屏幕坐标拖拽：按下点决定投给哪个子窗口。
+pub fn drag_screen(hwnd: HWND, from: (i32, i32), to: (i32, i32), steps: u32) -> Result<()> {
+    let target = deepest_child(hwnd, from.0, from.1);
+    let (x0, y0) = screen_to_client(target, from.0, from.1);
+    let (x1, y1) = screen_to_client(target, to.0, to.1);
+    drag_client(target, (x0, y0), (x1, y1), steps)
 }
 
 /// 双击：系统平时靠真实输入生成 WM_LBUTTONDBLCLK，投递时得自己补上。
@@ -216,7 +242,6 @@ pub fn type_text(hwnd: HWND, text: &str) -> Result<()> {
         if !send(hwnd, WM_CHAR, ch as usize, LPARAM(1)) {
             return Err(DeskError::new("BG_DELIVER_FAILED", "投递 WM_CHAR 失败").delivered());
         }
-        std::thread::sleep(std::time::Duration::from_millis(3));
     }
     Ok(())
 }
