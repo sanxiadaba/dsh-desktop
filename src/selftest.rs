@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    CS_HREDRAW, CS_VREDRAW, WS_EX_NOACTIVATE, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetMessageW, MSG, PostMessageW, RegisterClassW, TranslateMessage, WM_CHAR, WM_CLOSE,
     WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
@@ -110,7 +110,7 @@ pub fn run(physical_check: bool) -> Result<Value> {
         }
         let title = windows::core::HSTRING::from("desk selftest");
         let hwnd = CreateWindowExW(
-            Default::default(),
+            WS_EX_NOACTIVATE,
             windows::core::PCWSTR(class_name.as_ptr()),
             &title,
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -179,7 +179,8 @@ pub fn run(physical_check: bool) -> Result<Value> {
         kd >= 2 && last == 0x41,
     );
 
-    // 3) 后台文本：WM_CHAR 拼回原串。
+    // 3) 后台文本：WM_CHAR 拼回原串。先清空，避免把用户此刻的按键算进来。
+    c.chars.lock().unwrap().clear();
     let text = input::type_text(hwnd, "hi 42");
     std::thread::sleep(std::time::Duration::from_millis(150));
     let got = c.chars.lock().unwrap().clone();
@@ -218,6 +219,10 @@ pub fn run(physical_check: bool) -> Result<Value> {
 
     // 7) 物理输入（可选）：会移动真实光标，只在 --physical 时跑。
     if physical_check {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
         let (px, py) = win::client_to_screen(hwnd, 120, 140);
         let ok_phys;
         if let Err(e) = crate::physical::click(px, py) {
