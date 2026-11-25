@@ -162,19 +162,19 @@ pub fn help_for(cmd: &str) -> &'static str {
             "desk snap [--window <id>] [--depth N] [--limit N] [--raw] [--actionable] [--name 文本]\n读 UIA 树。每个元素带 @ref、role、name、actions、rect、depth。\n--actionable 只留能动的元素；--raw 用 RawView（含不可见脚手架）。"
         }
         "click" => {
-            "desk click <@ref> [--mode semantic|bg|physical] [--verify]\nsemantic=UIA 模式（不动鼠标）；bg=投递窗口消息（不动光标、不抢前台）；physical=SendInput（会动你的鼠标，必须明确指定）。\n--verify 会在动作后重新读一次界面并回报元素状态。"
+            "desk click <@ref> [--mode semantic|bg] [--verify]\nsemantic=UIA 模式；bg=投递窗口消息。两条路都不会移动光标、不会改变前台。\n--verify 会在动作后重新读一次界面并回报元素状态。"
         }
         "type" => {
-            "desk type <文本> [--window <id>|--ref <@ref>] [--method auto|value|keys|paste|physical]\nauto/keys=逐字 WM_CHAR（ASCII 和中文都行，绕过输入法）；value=UIA ValuePattern 直接写值；paste=剪贴板+粘贴；physical=SendInput。"
+            "desk type <文本> [--window <id>|--ref <@ref>] [--method auto|value|keys|paste]\nauto/keys=逐字 WM_CHAR（ASCII 和中文都行，绕过输入法）；value=UIA ValuePattern 直接写值；paste=剪贴板+粘贴。"
         }
         "key" => {
-            "desk key <组合键> [--window <id>|--ref <@ref>] [--mode bg|physical]\n组合键写法：ctrl+s、alt+F4、shift+tab、enter、f5。默认发给目标窗口里有焦点的子控件。"
+            "desk key <组合键> [--window <id>|--ref <@ref>]\n组合键写法：ctrl+s、alt+F4、shift+tab、enter、f5。发给目标窗口里有焦点的子控件，不抢前台。"
         }
         "run" => {
             "desk run -\n从 stdin 读 {\"steps\":[[\"click\",\"@s1:e3\"],[\"type\",\"hi\",\"--window\",\"w-1\"]]}，一个进程里连续执行。"
         }
         "selftest" => {
-            "desk selftest [--physical]\n不依赖外部程序：自己建一个不抢前台的窗口，验证鼠标/键盘/滚轮注入、窗口枚举和截图。--physical 额外验证 SendInput（会动光标）。"
+            "desk selftest\n不依赖外部程序：自己建一个不抢前台的窗口，验证鼠标/键盘/滚轮注入、窗口枚举和截图。"
         }
         _ => HELP_MAIN,
     }
