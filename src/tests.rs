@@ -59,6 +59,27 @@ fn roles_map_to_stable_tokens() {
 }
 
 #[test]
+fn admin_gate_allows_only_diagnostics() {
+    for ok in ["help", "status", "elevate"] {
+        assert!(crate::is_readonly(ok), "{ok} 应该允许非管理员");
+    }
+    for deny in ["click", "type", "snap", "windows", "shot", "run"] {
+        assert!(!crate::is_readonly(deny), "{deny} 应该要求管理员");
+    }
+}
+
+#[test]
+fn admin_gate_passes_on_this_machine() {
+    // 本机是管理员会话；如果这条失败，说明测试环境本身不是管理员，属于环境问题。
+    match crate::win::integrity_rid(std::process::id()) {
+        Some(rid) if rid < 0x3000 => {
+            assert!(crate::ensure_admin().is_err(), "低完整性时应该拒绝");
+        }
+        _ => assert!(crate::ensure_admin().is_ok()),
+    }
+}
+
+#[test]
 fn integrity_levels_map_to_names() {
     assert_eq!(crate::win::integrity_name(0x0000), "untrusted");
     assert_eq!(crate::win::integrity_name(0x1000), "low");

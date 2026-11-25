@@ -21,6 +21,20 @@ $desk = "$env:USERPROFILE\.dsh\skills\desktop\desk.exe"
 if (-not (Test-Path $desk)) { throw "desk.exe 不存在，先运行 $env:USERPROFILE\.dsh\skills\desktop\build.cmd" }
 ```
 
+## 前提：必须以管理员身份运行
+
+这个技能要求执行它的进程具备管理员权限（完整性级别 `high`）。
+非管理员运行时，除 `status` / `help` / `elevate` 之外的所有命令都会直接返回
+`NEED_ADMIN`（不会"看起来成功、实际没动"）。
+
+只有单条命令需要提权时：
+
+```powershell
+& $desk elevate -- click '@s1:e3'
+```
+
+会弹一次 UAC，子进程的结果原样带回。长期使用请直接以管理员身份启动 DSH / 终端。
+
 每个命令输出一个 JSON 信封：`{"ok":true,"command":"...","elapsed_ms":31,"data":{...}}`，
 失败时是 `{"ok":false,"error":{"code":"...","message":"...","retry":"safe|unsafe"}}`。
 用 `| ConvertFrom-Json` 解析，**不要**用返回文字去猜。

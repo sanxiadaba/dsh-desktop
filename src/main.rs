@@ -104,10 +104,38 @@ fn emit(envelope: &Value, file: Option<&std::path::Path>) {
     }
 }
 
+/// 只读/诊断命令：非管理员也允许（用于排查环境）。
+fn is_readonly(cmd: &str) -> bool {
+    matches!(cmd, "help" | "--help" | "-h" | "status" | "elevate")
+}
+
+/// 本技能以管理员权限为运行前提：桌面自动化要投消息、读 UIA、操作提权窗口，
+/// 低完整性跑起来只会"看起来成功、实际没动"，所以直接拒绝，而不是打补丁。
+fn ensure_admin() -> Result<()> {
+    match win::integrity_rid(std::process::id()) {
+        Some(rid) if rid < 0x3000 => Err(DeskError::new(
+            "NEED_ADMIN",
+            format!(
+                "本技能需要管理员权限运行（当前完整性：{}）",
+                win::integrity_name(rid)
+            ),
+        )
+        .with_suggestion("用管理员身份启动 DSH / 终端；单条命令可用 `desk elevate -- <命令>`")
+        .with_details(json!({
+            "tool_integrity": win::integrity_name(rid),
+            "required": "high",
+        }))),
+        _ => Ok(()),
+    }
+}
+
 fn run(argv: &[String]) -> Result<(String, Value)> {
     let Some(cmd) = argv.first().map(|s| s.as_str()) else {
         return Err(DeskError::new("BAD_ARGS", "缺少子命令").with_suggestion("desk help"));
     };
+    if !is_readonly(cmd) {
+        ensure_admin()?;
+    }
     let args = Args::new(&argv[1..]);
     if args.has("--help") {
         return Ok((cmd.to_string(), json!({ "help": cli::help_for(cmd) })));
@@ -238,6 +266,7 @@ fn status() -> Result<Value> {
         "pid": std::process::id(),
         "elevated": win::is_elevated(std::process::id()),
         "integrity": win::integrity_label(std::process::id()),
+        "needs_admin": win::integrity_rid(std::process::id()).map(|r| r < 0x3000).unwrap_or(false),
         "windows": all.len(),
         "foreground": foreground.map(|w| json!({"id": w.id, "title": w.title, "exe": w.exe})),
         "state_dir": state_dir().display().to_string(),

@@ -76,6 +76,12 @@ $desk = "$env:USERPROFILE\.dsh\skills\desktop\desk.exe"
  "error":{"code":"STALE_REF","message":"界面已变化…","retry":"safe"}}
 ```
 
+## 运行前提：管理员
+
+本技能要求执行它的进程具备管理员权限（完整性 `high`）。非管理员时除 `status`/`help`/`elevate`
+之外的命令一律返回 `NEED_ADMIN`——桌面自动化在低完整性下只会"看起来成功、实际没动"，
+所以在入口就拒绝，而不是事后打补丁。
+
 ## 安全模型
 
 **这个工具里没有任何物理输入。** 代码中不存在 `SendInput`、`SetCursorPos`、`mouse_event`、`keybd_event`，
