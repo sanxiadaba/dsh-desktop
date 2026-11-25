@@ -616,13 +616,6 @@ impl Uia {
         }
     }
 
-    pub fn set_focus(&self, el: &IUIAutomationElement) -> Result<()> {
-        unsafe {
-            el.SetFocus()
-                .map_err(|e| DeskError::new("ACTION_FAILED", format!("设置焦点失败：{e}")))
-        }
-    }
-
     pub fn expand(&self, el: &IUIAutomationElement, open: bool) -> Result<()> {
         unsafe {
             let p = el

@@ -108,9 +108,9 @@ fn takes_value(flag: &str) -> bool {
     )
 }
 
-pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义动作 / 后台注入 / 物理兜底）
+pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义动作 / 后台注入）
 
-默认不抢前台、不动光标：语义动作走不通时自动改为向目标窗口投递鼠标键盘消息。
+本工具不做物理输入：不发 SendInput、不移动光标、不把窗口切到前台。动作只走两条路——UIA 语义，或向目标窗口投递消息。
 
 观察
   windows  [--all]                      列出窗口（默认只要标题非空、非本进程的）
@@ -122,7 +122,7 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
   shot     [--window <id>] [--out 路径] [--screen]
                                          截图 PNG；窗口被遮挡也能拍
 
-动作（不加 --mode physical 就不会移动真实光标）
+动作（全部在后台完成）
   click    <@ref> [--mode semantic|bg|physical] [--verify]
   rclick   <@ref>                        右键
   dclick   <@ref>                        双击
@@ -130,7 +130,7 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
   toggle   <@ref>                        切换勾选状态
   set      <@ref> <值>                   直接写值（ValuePattern）
   expand   <@ref> / collapse <@ref>      展开 / 折叠（菜单、树节点、下拉框）
-  scrollitem <@ref> / setfocus <@ref>    滚进视野 / 把键盘焦点给它
+  scrollitem <@ref>                      把滚出视口的元素滚回可见区
   scroll   <@ref> <增量>                 或 --window <id> --xy X,Y
   wheel    --window <id> [--delta -120] [--xy X,Y]
   drag     "x1,y1" "x2,y2" [--window <id>]
@@ -139,7 +139,7 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
 
 窗口
   launch   <exe 或路径> [--dir 目录]
-  focus | minimize | maximize | restore | close  <窗口 id>
+  minimize | maximize | restore | close  <窗口 id>   （都不激活窗口）
   move     <窗口 id> <x> <y>
   resize   <窗口 id> <宽> <高>
 
@@ -149,7 +149,7 @@ pub const HELP_MAIN: &str = r#"desk — Windows 桌面控制（观察 / 语义�
   wait     --window <id> [--text <文本> | --element <role:名字>] [--timeout-ms N]
   guard    --seconds N [--window <id>|--exe <名>]   临时钉住前台：程序自己跳出来就压回去
   run      -                             从 stdin 读 {"steps":[["click","@s1:e3"], ...]}
-  selftest [--physical]                  自测：自己开窗验证注入（--physical 会动光标）
+  selftest                               自测：自己开窗验证注入，不碰你的桌面
   help [命令]                            本帮助
 
 ref 形如 @s1a2b:e3，由 snap 生成；界面一变就重新 snap。

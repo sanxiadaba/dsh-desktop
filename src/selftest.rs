@@ -94,7 +94,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
-pub fn run(physical_check: bool) -> Result<Value> {
+pub fn run() -> Result<Value> {
     let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(usize, usize), String>>();
 
     let join = std::thread::spawn(move || unsafe {
@@ -261,41 +261,6 @@ pub fn run(physical_check: bool) -> Result<Value> {
         format!("{:?}", shot.map(|i| (i.width, i.height))),
         ok_shot,
     );
-
-    // 7) 物理输入（可选）：会移动真实光标，只在 --physical 时跑。
-    if physical_check {
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        let (px, py) = win::client_to_screen(hwnd, 120, 140);
-        let ok_phys;
-        if let Err(e) = crate::physical::click(px, py) {
-            ok_phys = false;
-            check("physical_click", "ok", format!("err={e}"), false);
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            ok_phys = c.lbutton_down.load(Ordering::SeqCst) >= 2;
-            check(
-                "physical_click",
-                "second click counted",
-                format!("down={}", c.lbutton_down.load(Ordering::SeqCst)),
-                ok_phys,
-            );
-        }
-        if ok_phys {
-            let before = c.chars.lock().unwrap().len();
-            let r = crate::physical::type_text("xy");
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            let after = c.chars.lock().unwrap().len();
-            check(
-                "physical_type",
-                "+2 chars",
-                format!("before={before} after={after} err={:?}", r.err()),
-                after >= before + 2,
-            );
-        }
-    }
 
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_QUIT, WPARAM(0), LPARAM(0));

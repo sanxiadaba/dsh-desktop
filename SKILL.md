@@ -30,7 +30,7 @@ if (-not (Test-Path $desk)) { throw "desk.exe 不存在，先运行 $env:USERPRO
 1. **动作前必须先看**：`snap` 一次，拿到 `@ref` 再动手。不要凭记忆复用一个旧 ref。
 2. **动作后必须验证**：重新 `snap`、看窗口标题、或读元素的值，确认真的生效了。
    返回 `ok:true` 只代表消息投递成功，不代表界面按预期变了。
-3. **不要抢用户的前台**：不要为了点击去 `focus`；不要用 `--mode physical` 兜底。
+3. **不要抢用户的前台**：这个工具没有物理输入，也没有 `focus` 命令。
    默认路径本来就是后台的。
 
 ## 主循环
@@ -79,12 +79,12 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 
 ```powershell
 & $desk click  '@s1:e7'                  # 语义优先 → 后台注入兜底
-& $desk click  '@s1:e7' --mode bg        # 强制后台注入
+& $desk click  '@s1:e7' --mode bg        # 强制后台注入（不动光标）
 & $desk click  '@s1:e7' --verify         # 动作后自动重新读一次状态
 & $desk toggle '@s1:e9'                  # 勾选框
 & $desk set    '@s1:e4' "C:\temp\a.hex"  # 输入框直接赋值
 & $desk scrollitem '@s1:e120'            # 滚进可见区
-& $desk setfocus '@s1:e4'                # 把键盘焦点给它（可能激活窗口，慎用）
+
 ```
 
 键盘与文本，默认打给**目标窗口里真正有焦点的子控件**，不要求窗口在前台：
@@ -119,7 +119,7 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 & $desk close    w-306bc
 ```
 
-`focus` 会真的把窗口切到前台，只在用户明确要求时用。
+`restore` 只恢复不激活；工具里没有把窗口切到前台的命令。
 
 ## 观察别的形式
 
@@ -162,7 +162,6 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 | `BG_DELIVER_FAILED` | 目标不处理投递的消息 | 目标可能挂起，或它在 DirectX/UIPI 环境里 |
 | `WINDOW_GONE` | 窗口已关闭 | 重新 `windows` 找 |
 | `WAIT_TIMEOUT` | 等待条件没出现 | 加大 `--timeout-ms`；先确认程序真的在执行 |
-| `PHYSICAL_FAILED` | SendInput 被拒 | 多半是 UIPI 完整性级别不一致 |
 
 `retry` 字段：`safe` 表示动作肯定没落地，可以重试；`unsafe` 表示可能已经生效，
 **先重新读状态再决定**，不要盲目重试（会点两次）。
@@ -185,8 +184,7 @@ $s.data.elements | Select-Object ref, role, name, actions | Format-Table -AutoSi
 怀疑环境有问题时先跑自测，它不依赖任何外部程序：
 
 ```powershell
-& $desk selftest            # 6 项：消息注入、键盘、文本、滚轮、枚举、截图
-& $desk selftest --physical # 8 项，额外验证 SendInput（会动光标）
+& $desk selftest            # 7 项：消息注入、子窗口、键盘、文本、滚轮、枚举、截图
 ```
 
 全绿说明注入层是好的，问题就在目标程序那一侧。

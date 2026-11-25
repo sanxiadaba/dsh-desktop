@@ -57,17 +57,15 @@ pub fn resolve(uia: &Uia, ref_id: &str) -> Result<Resolved> {
 pub enum Mode {
     Semantic,
     Background,
-    Physical,
 }
 
 pub fn parse_mode(s: &str) -> Result<Mode> {
     match s {
         "semantic" | "auto" => Ok(Mode::Semantic),
         "bg" | "background" => Ok(Mode::Background),
-        "physical" => Ok(Mode::Physical),
         other => Err(DeskError::new(
             "BAD_ARGS",
-            format!("--mode 只能是 semantic / bg / physical，收到：{other}"),
+            format!("--mode 只能是 semantic / bg，收到：{other}"),
         )),
     }
 }
@@ -190,17 +188,6 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
     let has = |a: &str| r.node.actions.iter().any(|x| x == a);
     let tried: Vec<&str> = r.node.actions.iter().map(|s| s.as_str()).collect();
 
-    if matches!(mode, Some(Mode::Physical)) {
-        // 物理点击：真的动光标。调用方必须显式要求。
-        let (x, y) = center(&r.node);
-        crate::physical::click(x, y)?;
-        return Ok(json!({
-            "ref": ref_id, "mode": "physical", "at": {"x": x, "y": y},
-            "element": {"role": r.node.role, "name": r.node.name},
-            "note": "物理点击移动了真实光标，并且打在当前前台窗口上",
-        }));
-    }
-
     let force_bg = matches!(mode, Some(Mode::Background));
     if !force_bg {
         if has("click") {
@@ -300,16 +287,6 @@ pub fn scroll_into_view(uia: &Uia, ref_id: &str) -> Result<Value> {
     res?;
     Ok(json!({"ref": ref_id, "mode": "semantic:scrollinto",
         "element": {"role": r.node.role, "name": r.node.name}}))
-}
-
-pub fn set_focus(uia: &Uia, ref_id: &str) -> Result<Value> {
-    let r = resolve(uia, ref_id)?;
-    let (res, stolen) = guarded(|| uia.set_focus(&r.element));
-    res?;
-    Ok(json!({"ref": ref_id, "mode": "semantic:focus",
-        "element": {"role": r.node.role, "name": r.node.name},
-        "note": "元素获得键盘焦点；窗口可能被激活",
-        "focus_restored": if stolen { json!(true) } else { json!(false) }}))
 }
 
 pub fn select(uia: &Uia, ref_id: &str) -> Result<Value> {

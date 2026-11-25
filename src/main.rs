@@ -3,7 +3,6 @@ mod cli;
 mod clipboard;
 mod error;
 mod input;
-mod physical;
 mod selftest;
 mod shot;
 mod store;
@@ -27,6 +26,8 @@ fn main() {
         );
     }
     let started = Instant::now();
+    let fg0 = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
     // help 直接输出纯文本，不套 JSON 信封；其他命令一律 JSON。
@@ -42,28 +43,49 @@ fn main() {
 
     match run(&argv) {
         Ok((cmd, data)) => {
+            let restored = settle_foreground(fg0, &cmd);
             let envelope = json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "ok": true,
                 "command": cmd,
                 "elapsed_ms": started.elapsed().as_millis() as u64,
+                "side_effects": { "foreground_restored": restored },
                 "data": data,
             });
             println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
         }
         Err(e) => {
             let cmd = argv.first().cloned().unwrap_or_default();
+            let restored = settle_foreground(fg0, &cmd);
             let envelope = json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "ok": false,
                 "command": cmd,
                 "elapsed_ms": started.elapsed().as_millis() as u64,
+                "side_effects": { "foreground_restored": restored },
                 "error": e.to_json(),
             });
             println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
             std::process::exit(1);
         }
     }
+}
+
+/// 命令结束后把前台还原回去（guard 命令本身除外），返回是否真的还原了。
+fn settle_foreground(fg0: HWND, cmd: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    if cmd == "guard" || fg0.0.is_null() {
+        return false;
+    }
+    let fg = unsafe { GetForegroundWindow() };
+    if fg == fg0 {
+        return false;
+    }
+    unsafe {
+        let _ = SetForegroundWindow(fg0);
+    }
+    std::thread::sleep(Duration::from_millis(20));
+    unsafe { GetForegroundWindow() == fg0 }
 }
 
 fn run(argv: &[String]) -> Result<(String, Value)> {
@@ -98,15 +120,11 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
             let uia = Uia::new()?;
             Ok(("info".into(), act::info(&uia, ref_id)?))
         }
-        "scrollitem" | "scrollinto" | "setfocus" => {
+        "scrollitem" | "scrollinto" => {
             let r = args.positionals();
             let ref_id = r.first().ok_or_else(|| need("<@ref>"))?;
             let uia = Uia::new()?;
-            let v = if cmd == "setfocus" {
-                act::set_focus(&uia, ref_id)?
-            } else {
-                act::scroll_into_view(&uia, ref_id)?
-            };
+            let v = act::scroll_into_view(&uia, ref_id)?;
             Ok((cmd.into(), v))
         }
         "select" | "toggle" | "expand" | "collapse" => {
@@ -154,8 +172,12 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
         "wait" => Ok(("wait".into(), wait_cmd(&args)?)),
         "guard" => Ok(("guard".into(), guard_cmd(&args)?)),
         "run" => Ok(("run".into(), run_cmd(&args)?)),
-        "selftest" => Ok(("selftest".into(), selftest::run(args.has("--physical"))?)),
-        "focus" | "minimize" | "maximize" | "restore" | "close" => {
+        "selftest" => Ok(("selftest".into(), selftest::run()?)),
+        "focus" => Err(
+            DeskError::new("DISABLED", "focus 已禁用：本工具不会把窗口切到前台")
+                .with_suggestion("用 snap/click 在后台操作"),
+        ),
+        "minimize" | "maximize" | "restore" | "close" => {
             Ok((cmd.into(), window_action(cmd, &args)?))
         }
         "move" | "resize" => Ok((cmd.into(), window_geometry(cmd, &args)?)),
@@ -297,12 +319,6 @@ fn click_cmd(args: &Args) -> Result<(String, Value)> {
         Some(m) => Some(act::parse_mode(&m)?),
         None => None,
     };
-    if matches!(mode, Some(act::Mode::Physical)) && !args.has("--yes") {
-        return Err(
-            DeskError::new("NEED_CONFIRM", "物理点击会移动真实光标、抢走键盘焦点")
-                .with_suggestion("确实要用就加 --yes"),
-        );
-    }
     let uia = Uia::new()?;
     let mut out = act::click(&uia, ref_id, mode)?;
 
@@ -369,24 +385,7 @@ fn verify_ref(snapshot: &Value, ref_id: &str) -> Value {
 fn key_cmd(args: &Args) -> Result<(String, Value)> {
     let r = args.positionals();
     let combo = r.first().ok_or_else(|| need("<组合键>"))?;
-    let mode = args
-        .opt("--mode")
-        .map(|m| act::parse_mode(&m))
-        .transpose()?
-        .unwrap_or(act::Mode::Background);
-    if matches!(mode, act::Mode::Physical) {
-        if !args.has("--yes") {
-            return Err(
-                DeskError::new("NEED_CONFIRM", "物理按键会抢走当前前台窗口的键盘输入")
-                    .with_suggestion("确实要用就加 --yes"),
-            );
-        }
-        physical::key_combo(combo)?;
-        return Ok((
-            "key".into(),
-            json!({"mode": "physical", "combo": combo, "note": "物理按键打在当前前台窗口上"}),
-        ));
-    }
+
     let hwnd = target_window(args)?;
     let key_hwnd = typing_hwnd(hwnd);
     Ok(("key".into(), act::key(key_hwnd, combo)?))
@@ -398,19 +397,6 @@ fn type_cmd(args: &Args) -> Result<(String, Value)> {
     let method = args.opt("--method").unwrap_or_else(|| "auto".to_string());
     let hwnd = target_window(args)?;
     match method.as_str() {
-        "physical" => {
-            if !args.has("--yes") {
-                return Err(
-                    DeskError::new("NEED_CONFIRM", "物理输入会移动光标并抢键盘焦点")
-                        .with_suggestion("确实要用就加 --yes"),
-                );
-            }
-            physical::type_text(text)?;
-            Ok((
-                "type".into(),
-                json!({"mode": "physical", "chars": text.chars().count()}),
-            ))
-        }
         "paste" | "clipboard" => {
             clipboard::set_text(text)?;
             let key_hwnd = typing_hwnd(hwnd);
@@ -437,7 +423,7 @@ fn type_cmd(args: &Args) -> Result<(String, Value)> {
         }
         other => Err(DeskError::new(
             "BAD_ARGS",
-            format!("--method 只能是 auto / value / keys / paste / physical，收到：{other}"),
+            format!("--method 只能是 auto / value / keys / paste，收到：{other}"),
         )),
     }
 }
