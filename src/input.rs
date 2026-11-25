@@ -54,6 +54,29 @@ pub fn click_screen(hwnd: HWND, sx: i32, sy: i32, button: Button) -> Result<()> 
     click_client(target, cx, cy, button)
 }
 
+/// 执行一个后台动作，并保证它不改变前台窗口。
+///
+/// 有些程序（Qt 尤其）收到点击会自己 SetActiveWindow，把窗口顶到最前。
+/// 这里在动作前后对比前台窗口，一旦被换走就立刻还回原来的前台。
+/// 返回 (动作结果, 是否发生过抢占)。
+pub fn with_foreground_guard<T>(f: impl FnOnce() -> T) -> (T, bool) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    let before = unsafe { GetForegroundWindow() };
+    let out = f();
+    let after = unsafe { GetForegroundWindow() };
+    if before != after && !before.0.is_null() {
+        unsafe {
+            let _ = SetForegroundWindow(before);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let now = unsafe { GetForegroundWindow() };
+        if now == before {
+            return (out, true);
+        }
+    }
+    (out, false)
+}
+
 /// 坐标下面真正该收消息的那个 HWND。
 ///
 /// 很多程序把界面拆成子窗口（比如 Win32 的 SysTabControl32 页签控件）：

@@ -658,7 +658,7 @@ fn shot_cmd(args: &Args) -> Result<Value> {
 
 fn window_action(cmd: &str, args: &Args) -> Result<Value> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, WM_CLOSE,
+        SW_MAXIMIZE, SW_MINIMIZE, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow, WM_CLOSE,
     };
     let r = args.positionals();
     let id = r.first().ok_or_else(|| need("<窗口 id>"))?;
@@ -682,7 +682,8 @@ fn window_action(cmd: &str, args: &Args) -> Result<Value> {
         }
         "restore" => {
             unsafe {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+                // SW_RESTORE 会抢前台；用 SW_SHOWNOACTIVATE 只恢复不激活。
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             Ok(json!({"id": id, "restored": true}))
         }
@@ -728,7 +729,7 @@ fn window_geometry(cmd: &str, args: &Args) -> Result<Value> {
 
 fn launch_cmd(args: &Args) -> Result<Value> {
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE;
     let r = args.positionals();
     let target = r.first().ok_or_else(|| need("<exe 或路径>"))?;
     let dir = args.opt("--dir");
@@ -743,7 +744,7 @@ fn launch_cmd(args: &Args) -> Result<Value> {
                 .as_ref()
                 .map(|h| windows::core::PCWSTR(h.as_ptr()))
                 .unwrap_or(windows::core::PCWSTR::null()),
-            SW_SHOWNORMAL,
+            SW_SHOWNOACTIVATE,
         )
     };
     let code = hinst.0 as isize;

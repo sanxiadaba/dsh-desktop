@@ -90,6 +90,14 @@ fn ensure_inside(hwnd: HWND, sx: i32, sy: i32) -> Result<()> {
     Ok(())
 }
 
+/// 执行一个动作并保持前台不变；返回值里带上"是否发生过抢占"。
+fn guarded<F, T>(f: F) -> (Result<T>, bool)
+where
+    F: FnOnce() -> Result<T>,
+{
+    input::with_foreground_guard(f)
+}
+
 fn center(node: &Node) -> (i32, i32) {
     (
         node.rect.x + node.rect.width / 2,
@@ -116,26 +124,25 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
 
     let force_bg = matches!(mode, Some(Mode::Background));
     if !force_bg {
-        if has("click") {
-            uia.invoke(&r.element)?;
-            return Ok(json!({
-                "ref": ref_id, "mode": "semantic:invoke", "actions": tried,
+        let semantic = if has("click") {
+            Some(("semantic:invoke", guarded(|| uia.invoke(&r.element))))
+        } else if has("select") {
+            Some(("semantic:select", guarded(|| uia.select(&r.element))))
+        } else if has("toggle") {
+            Some(("semantic:toggle", guarded(|| uia.toggle(&r.element))))
+        } else {
+            None
+        };
+        if let Some((mode_name, (res, stolen))) = semantic {
+            res?;
+            let mut out = json!({
+                "ref": ref_id, "mode": mode_name, "actions": tried,
                 "element": {"role": r.node.role, "name": r.node.name},
-            }));
-        }
-        if has("select") {
-            uia.select(&r.element)?;
-            return Ok(json!({
-                "ref": ref_id, "mode": "semantic:select", "actions": tried,
-                "element": {"role": r.node.role, "name": r.node.name},
-            }));
-        }
-        if has("toggle") {
-            uia.toggle(&r.element)?;
-            return Ok(json!({
-                "ref": ref_id, "mode": "semantic:toggle", "actions": tried,
-                "element": {"role": r.node.role, "name": r.node.name},
-            }));
+            });
+            if stolen {
+                out["focus_restored"] = json!(true);
+            }
+            return Ok(out);
         }
     }
 
@@ -143,14 +150,20 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
     let (x, y) = center(&r.node);
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
-    input::click_screen(hwnd, x, y, input::Button::Left)?;
-    Ok(json!({
+    let (res, stolen) =
+        input::with_foreground_guard(|| input::click_screen(hwnd, x, y, input::Button::Left));
+    res?;
+    let mut out = json!({
         "ref": ref_id, "mode": if force_bg {"bg"} else {"bg:fallback"},
         "actions": tried,
         "at": {"x": x, "y": y},
         "element": {"role": r.node.role, "name": r.node.name},
         "note": "该元素没有可用的 UIA 动作，已改为投递后台鼠标消息",
-    }))
+    });
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 /// 右键 / 双击：只走后台注入（语义层没有这两个动作）。
@@ -198,72 +211,103 @@ pub fn info(uia: &Uia, ref_id: &str) -> Result<Value> {
 
 pub fn scroll_into_view(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    uia.scroll_into_view(&r.element)?;
+    let (res, _stolen) = guarded(|| uia.scroll_into_view(&r.element));
+    res?;
     Ok(json!({"ref": ref_id, "mode": "semantic:scrollinto",
         "element": {"role": r.node.role, "name": r.node.name}}))
 }
 
 pub fn set_focus(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    uia.set_focus(&r.element)?;
+    let (res, stolen) = guarded(|| uia.set_focus(&r.element));
+    res?;
     Ok(json!({"ref": ref_id, "mode": "semantic:focus",
         "element": {"role": r.node.role, "name": r.node.name},
-        "note": "元素获得键盘焦点；窗口可能被激活"}))
+        "note": "元素获得键盘焦点；窗口可能被激活",
+        "focus_restored": if stolen { json!(true) } else { json!(false) }}))
 }
 
 pub fn select(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    uia.select(&r.element)?;
-    Ok(json!({"ref": ref_id, "mode": "semantic:select",
-        "element": {"role": r.node.role, "name": r.node.name}}))
+    let (res, stolen) = guarded(|| uia.select(&r.element));
+    res?;
+    let mut out = json!({"ref": ref_id, "mode": "semantic:select",
+        "element": {"role": r.node.role, "name": r.node.name}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn toggle(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    uia.toggle(&r.element)?;
-    Ok(json!({"ref": ref_id, "mode": "semantic:toggle",
-        "element": {"role": r.node.role, "name": r.node.name}}))
+    let (res, stolen) = guarded(|| uia.toggle(&r.element));
+    res?;
+    let mut out = json!({"ref": ref_id, "mode": "semantic:toggle",
+        "element": {"role": r.node.role, "name": r.node.name}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn set_value(uia: &Uia, ref_id: &str, value: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    uia.set_value(&r.element, value)?;
+    let (res, stolen) = guarded(|| uia.set_value(&r.element, value));
+    res?;
     let after = uia.value_of(&r.element);
-    Ok(
-        json!({"ref": ref_id, "mode": "semantic:set", "value": after,
-        "element": {"role": r.node.role, "name": r.node.name}}),
-    )
+    let mut out = json!({"ref": ref_id, "mode": "semantic:set", "value": after,
+        "element": {"role": r.node.role, "name": r.node.name}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn expand(uia: &Uia, ref_id: &str, open: bool) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    uia.expand(&r.element, open)?;
-    Ok(
-        json!({"ref": ref_id, "mode": if open {"expand"} else {"collapse"},
-        "element": {"role": r.node.role, "name": r.node.name}}),
-    )
+    let (res, stolen) = guarded(|| uia.expand(&r.element, open));
+    res?;
+    let mut out = json!({"ref": ref_id, "mode": if open {"expand"} else {"collapse"},
+        "element": {"role": r.node.role, "name": r.node.name}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 /// 后台键盘 / 文本：直接发给窗口，不抢前台。
 pub fn key(hwnd: HWND, combo: &str) -> Result<Value> {
-    input::key_combo(hwnd, combo)?;
-    Ok(json!({"mode": "bg:key", "combo": combo}))
+    let (res, stolen) = input::with_foreground_guard(|| input::key_combo(hwnd, combo));
+    res?;
+    let mut out = json!({"mode": "bg:key", "combo": combo});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn type_text(hwnd: HWND, text: &str) -> Result<Value> {
-    input::type_text(hwnd, text)?;
-    Ok(json!({"mode": "bg:type", "chars": text.chars().count()}))
+    let (res, stolen) = input::with_foreground_guard(|| input::type_text(hwnd, text));
+    res?;
+    let mut out = json!({"mode": "bg:type", "chars": text.chars().count()});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn wheel(hwnd: HWND, x: i32, y: i32, delta: i32) -> Result<Value> {
-    input::wheel_screen(hwnd, x, y, delta)?;
+    let (res, _stolen) = input::with_foreground_guard(|| input::wheel_screen(hwnd, x, y, delta));
+    res?;
     Ok(json!({"mode": "bg:wheel", "delta": delta}))
 }
 
 pub fn drag(hwnd: HWND, from: (i32, i32), to: (i32, i32)) -> Result<Value> {
     let (cx0, cy0) = win::screen_to_client(hwnd, from.0, from.1);
     let (cx1, cy1) = win::screen_to_client(hwnd, to.0, to.1);
-    input::drag_client(hwnd, (cx0, cy0), (cx1, cy1), 24)?;
+    let (res, _stolen) = guarded(|| input::drag_client(hwnd, (cx0, cy0), (cx1, cy1), 24));
+    res?;
     Ok(json!({"mode": "bg:drag", "from": {"x": from.0, "y": from.1}, "to": {"x": to.0, "y": to.1}}))
 }
 
