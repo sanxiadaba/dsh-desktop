@@ -49,8 +49,31 @@ pub fn post(hwnd: HWND, msg: u32, wparam: usize, lparam: LPARAM) -> bool {
 
 /// 屏幕坐标点击（左键）。窗口可以先不在前台。
 pub fn click_screen(hwnd: HWND, sx: i32, sy: i32, button: Button) -> Result<()> {
-    let (cx, cy) = screen_to_client(hwnd, sx, sy);
-    click_client(hwnd, cx, cy, button)
+    let target = deepest_child(hwnd, sx, sy);
+    let (cx, cy) = screen_to_client(target, sx, sy);
+    click_client(target, cx, cy, button)
+}
+
+/// 坐标下面真正该收消息的那个 HWND。
+///
+/// 很多程序把界面拆成子窗口（比如 Win32 的 SysTabControl32 页签控件）：
+/// 把消息投给顶层窗口，对话框过程不会转发给子控件，点了等于没点。
+/// 这里取该坐标下最深的、且属于目标窗口的 HWND；被别的程序挡住时退回顶层窗口。
+fn deepest_child(root: HWND, sx: i32, sy: i32) -> HWND {
+    use windows::Win32::UI::WindowsAndMessaging::{CWP_SKIPINVISIBLE, ChildWindowFromPointEx};
+    // 逐层往下找包含该点的子窗口。用 ChildWindowFromPointEx 而不是 WindowFromPoint：
+    // 目标窗口被别的程序挡住时，WindowFromPoint 会给出挡住它的窗口，导致消息投错地方。
+    let mut cur = root;
+    for _ in 0..8 {
+        let (cx, cy) = screen_to_client(cur, sx, sy);
+        let p = windows::Win32::Foundation::POINT { x: cx, y: cy };
+        let child = unsafe { ChildWindowFromPointEx(cur, p, CWP_SKIPINVISIBLE) };
+        if child.0.is_null() || child == cur {
+            break;
+        }
+        cur = child;
+    }
+    cur
 }
 
 pub fn click_client(hwnd: HWND, cx: i32, cy: i32, button: Button) -> Result<()> {

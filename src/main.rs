@@ -299,27 +299,6 @@ fn click_cmd(args: &Args) -> Result<(String, Value)> {
     let uia = Uia::new()?;
     let mut out = act::click(&uia, ref_id, mode)?;
 
-    // 物理点击：需要先拿到元素矩形，再走 SendInput。
-    if matches!(mode, Some(act::Mode::Physical)) {
-        let snap = store::load(
-            ref_id
-                .trim_start_matches('@')
-                .split(':')
-                .next()
-                .unwrap_or(""),
-        )?;
-        let node = snap
-            .find(ref_id)
-            .ok_or_else(|| DeskError::new("BAD_REF", "快照里没有这个 ref"))?;
-        let (x, y) = (
-            node.rect.x + node.rect.width / 2,
-            node.rect.y + node.rect.height / 2,
-        );
-        physical::click(x, y)?;
-        out = json!({"ref": ref_id, "mode": "physical", "at": {"x": x, "y": y},
-            "note": "物理点击会移动真实光标，并且打在当前前台窗口上"});
-    }
-
     if args.has("--verify") {
         std::thread::sleep(Duration::from_millis(250));
         let hwnd = target_window(args).or_else(|_| {

@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetMessageW, MSG, PostMessageW, RegisterClassW, TranslateMessage, WM_CHAR, WM_CLOSE,
     WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WS_CHILD, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 struct Counters {
@@ -30,6 +30,7 @@ struct Counters {
 }
 
 static STATE: std::sync::OnceLock<Counters> = std::sync::OnceLock::new();
+static CHILD_DOWN: AtomicI32 = AtomicI32::new(0);
 
 fn counters() -> &'static Counters {
     STATE.get_or_init(|| Counters {
@@ -43,6 +44,14 @@ fn counters() -> &'static Counters {
         last_vk: AtomicIsize::new(0),
         chars: Mutex::new(String::new()),
     })
+}
+
+unsafe extern "system" fn child_wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_LBUTTONDOWN {
+        CHILD_DOWN.fetch_add(1, Ordering::SeqCst);
+        return LRESULT(0);
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -86,7 +95,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 }
 
 pub fn run(physical_check: bool) -> Result<Value> {
-    let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<usize, String>>();
+    let (tx, rx) = std::sync::mpsc::channel::<std::result::Result<(usize, usize), String>>();
 
     let join = std::thread::spawn(move || unsafe {
         let hinst = match GetModuleHandleW(None) {
@@ -97,6 +106,15 @@ pub fn run(physical_check: bool) -> Result<Value> {
             }
         };
         let class_name = windows::core::HSTRING::from("DeskSelftestWindow");
+        let child_class = windows::core::HSTRING::from("DeskSelftestChild");
+        let cwc = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(child_wndproc),
+            hInstance: hinst,
+            lpszClassName: windows::core::PCWSTR(child_class.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassW(&cwc);
         let wc = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
@@ -127,7 +145,22 @@ pub fn run(physical_check: bool) -> Result<Value> {
             let _ = tx.send(Err("CreateWindowExW 失败".to_string()));
             return;
         };
-        let _ = tx.send(Ok(hwnd.0 as usize));
+        let child = CreateWindowExW(
+            Default::default(),
+            windows::core::PCWSTR(child_class.as_ptr()),
+            &windows::core::HSTRING::from("child"),
+            WS_CHILD | WS_VISIBLE,
+            20,
+            20,
+            160,
+            40,
+            Some(hwnd),
+            None,
+            Some(hinst),
+            None,
+        );
+        let child_v = child.map(|c| c.0 as usize).unwrap_or(0);
+        let _ = tx.send(Ok((hwnd.0 as usize, child_v)));
         let mut msg = MSG::default();
         loop {
             let r = GetMessageW(&mut msg, None, 0, 0);
@@ -139,8 +172,8 @@ pub fn run(physical_check: bool) -> Result<Value> {
         }
     });
 
-    let hwnd = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(Ok(v)) => HWND(v as *mut _),
+    let (hwnd, child_hwnd) = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(Ok((v, c))) => (HWND(v as *mut _), HWND(c as *mut _)),
         Ok(Err(e)) => return Err(DeskError::new("SELFTEST_FAILED", e)),
         Err(_) => return Err(DeskError::new("SELFTEST_FAILED", "窗口创建超时")),
     };
@@ -165,6 +198,18 @@ pub fn run(physical_check: bool) -> Result<Value> {
         "down=1 up=1 at 60,80",
         format!("down={down} up={up} at {cx},{cy} err={:?}", click.err()),
         down == 1 && up == 1 && cx == 60 && cy == 80,
+    );
+
+    // 1b) 子窗口：经典 Win32 程序把控件做成子 HWND，消息必须投给最深的那个。
+    let (ccx, ccy) = win::client_to_screen(child_hwnd, 60, 18);
+    let child_click = input::click_screen(hwnd, ccx, ccy, input::Button::Left);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let cd = CHILD_DOWN.load(Ordering::SeqCst);
+    check(
+        "bg_click_child",
+        "child received 1",
+        format!("child_down={cd} err={:?}", child_click.err()),
+        cd == 1,
     );
 
     // 2) 后台键盘：组合键的按下次数、最后一次的 VK。

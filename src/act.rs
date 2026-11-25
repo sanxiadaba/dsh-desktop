@@ -104,10 +104,14 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
     let tried: Vec<&str> = r.node.actions.iter().map(|s| s.as_str()).collect();
 
     if matches!(mode, Some(Mode::Physical)) {
-        return Err(DeskError::new(
-            "NOT_IMPLEMENTED",
-            "物理点击还没接上（它会抢前台，故意不默认开）",
-        ));
+        // 物理点击：真的动光标。调用方必须显式要求。
+        let (x, y) = center(&r.node);
+        crate::physical::click(x, y)?;
+        return Ok(json!({
+            "ref": ref_id, "mode": "physical", "at": {"x": x, "y": y},
+            "element": {"role": r.node.role, "name": r.node.name},
+            "note": "物理点击移动了真实光标，并且打在当前前台窗口上",
+        }));
     }
 
     let force_bg = matches!(mode, Some(Mode::Background));
