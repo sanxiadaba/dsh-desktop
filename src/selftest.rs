@@ -248,6 +248,22 @@ pub fn run() -> Result<Value> {
         wc == -120,
     );
 
+    // 1d) 拖拽：按下/抬起都要落在同一个（父）窗口上，且中间要有移动。
+    let before_down = c.lbutton_down.load(Ordering::SeqCst);
+    let before_up = c.lbutton_up.load(Ordering::SeqCst);
+    let (dx0, dy0) = win::client_to_screen(hwnd, 40, 200);
+    let (dx1, dy1) = win::client_to_screen(hwnd, 220, 260);
+    crate::input::drag_screen(hwnd, (dx0, dy0), (dx1, dy1), 8)?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    let d_down = c.lbutton_down.load(Ordering::SeqCst) - before_down;
+    let d_up = c.lbutton_up.load(Ordering::SeqCst) - before_up;
+    check(
+        "bg_drag",
+        "down+1 up+1",
+        format!("down+{d_down} up+{d_up}"),
+        d_down == 1 && d_up == 1,
+    );
+
     // 2) 后台键盘：组合键的按下次数、最后一次的 VK。
     let key = input::key_combo(hwnd, "ctrl+a");
     std::thread::sleep(std::time::Duration::from_millis(120));
