@@ -152,6 +152,7 @@ fn run(argv: &[String]) -> Result<(String, Value)> {
         "shot" => Ok(("shot".into(), shot_cmd(&args)?)),
         "clipboard" => clipboard_cmd(&args),
         "wait" => Ok(("wait".into(), wait_cmd(&args)?)),
+        "guard" => Ok(("guard".into(), guard_cmd(&args)?)),
         "run" => Ok(("run".into(), run_cmd(&args)?)),
         "selftest" => Ok(("selftest".into(), selftest::run(args.has("--physical"))?)),
         "focus" | "minimize" | "maximize" | "restore" | "close" => {
@@ -296,6 +297,12 @@ fn click_cmd(args: &Args) -> Result<(String, Value)> {
         Some(m) => Some(act::parse_mode(&m)?),
         None => None,
     };
+    if matches!(mode, Some(act::Mode::Physical)) && !args.has("--yes") {
+        return Err(
+            DeskError::new("NEED_CONFIRM", "物理点击会移动真实光标、抢走键盘焦点")
+                .with_suggestion("确实要用就加 --yes"),
+        );
+    }
     let uia = Uia::new()?;
     let mut out = act::click(&uia, ref_id, mode)?;
 
@@ -368,6 +375,12 @@ fn key_cmd(args: &Args) -> Result<(String, Value)> {
         .transpose()?
         .unwrap_or(act::Mode::Background);
     if matches!(mode, act::Mode::Physical) {
+        if !args.has("--yes") {
+            return Err(
+                DeskError::new("NEED_CONFIRM", "物理按键会抢走当前前台窗口的键盘输入")
+                    .with_suggestion("确实要用就加 --yes"),
+            );
+        }
         physical::key_combo(combo)?;
         return Ok((
             "key".into(),
@@ -386,6 +399,12 @@ fn type_cmd(args: &Args) -> Result<(String, Value)> {
     let hwnd = target_window(args)?;
     match method.as_str() {
         "physical" => {
+            if !args.has("--yes") {
+                return Err(
+                    DeskError::new("NEED_CONFIRM", "物理输入会移动光标并抢键盘焦点")
+                        .with_suggestion("确实要用就加 --yes"),
+                );
+            }
             physical::type_text(text)?;
             Ok((
                 "type".into(),
@@ -444,6 +463,55 @@ fn clipboard_cmd(args: &Args) -> Result<(String, Value)> {
             format!("clipboard 只支持 get / set，收到：{other}"),
         )),
     }
+}
+
+/// 临时钉住前台：在 N 秒内，只要目标程序把自己顶到前台，就把它压回去。
+/// 有些上位机会定时自我激活，用这个压住。
+fn guard_cmd(args: &Args) -> Result<Value> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    args.reject_unknown(&["--seconds", "--window", "--exe"])?;
+    let secs = args.int("--seconds")?.unwrap_or(30).max(1) as u64;
+    let mut exe = args.opt("--exe");
+    if exe.is_none()
+        && let Some(w) = args.opt("--window")
+    {
+        let hwnd = win::parse_window_id(&w)?;
+        exe = unsafe { win::describe(hwnd, true) }.map(|i| i.exe);
+    }
+    let keep = unsafe { GetForegroundWindow() };
+    if keep.0.is_null() {
+        return Err(DeskError::new("NO_FOREGROUND", "当前没有前台窗口"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut restores = 0u32;
+    while Instant::now() < deadline {
+        let fg = unsafe { GetForegroundWindow() };
+        if fg != keep && !fg.0.is_null() {
+            let fg_exe = unsafe { win::describe(fg, true) }
+                .map(|i| i.exe)
+                .unwrap_or_default();
+            let hit = match &exe {
+                Some(t) => fg_exe.eq_ignore_ascii_case(t),
+                None => true,
+            };
+            if hit {
+                unsafe {
+                    let _ = SetForegroundWindow(keep);
+                }
+                restores += 1;
+            } else {
+                // 用户自己切到别的程序了，跟着走，不再钉住。
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    Ok(json!({
+        "kept": win::window_id(keep),
+        "seconds": secs,
+        "restores": restores,
+        "note": "期间目标程序抢前台会被压回去；用户切到别的程序就自动停止",
+    }))
 }
 
 fn wait_cmd(args: &Args) -> Result<Value> {
