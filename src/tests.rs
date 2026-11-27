@@ -243,11 +243,13 @@ fn every_command_is_documented_in_the_skill() {
 
 #[test]
 fn ref_can_be_passed_as_option() {
-    // --ref 与位置参数等价：info 应该走到"快照不存在"，而不是"缺少参数"。
-    let err = crate::dispatch("info", &Args::new(&argv(&["--ref", "@snope:e1"]))).unwrap_err();
-    assert_eq!(err.code, "SNAPSHOT_NOT_FOUND");
-    let err = crate::dispatch("info", &Args::new(&argv(&[]))).unwrap_err();
-    assert_eq!(err.code, "BAD_ARGS");
+    // 位置参数优先，其次 --ref；不要在测试里走 UIA（并行测试下 COM 初始化可能失败）。
+    let a = Args::new(&argv(&["--ref", "@s1:e1"]));
+    assert_eq!(crate::ref_arg(&a).as_deref(), Some("@s1:e1"));
+    let b = Args::new(&argv(&["@s2:e2", "--ref", "@s1:e1"]));
+    assert_eq!(crate::ref_arg(&b).as_deref(), Some("@s2:e2"));
+    let c = Args::new(&argv(&[]));
+    assert_eq!(crate::ref_arg(&c), None);
 }
 
 #[test]
