@@ -1,0 +1,27 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        run: cargo build --release
+      - name: package
+        shell: pwsh
+        run: |
+          Copy-Item target\release\desk.exe desk.exe
+          (Get-FileHash desk.exe -Algorithm SHA256).Hash | Out-File -Encoding ascii desk.exe.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desk.exe
+            desk.exe.sha256

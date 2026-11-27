@@ -23,14 +23,7 @@ fn split_ref(ref_id: &str) -> Result<(String, String)> {
     let (sid, item) = body
         .split_once(':')
         .ok_or_else(|| DeskError::new("BAD_REF", format!("ref 缺少快照 id：{ref_id}")))?;
-    // 快照 id 只允许 s + 小写字母数字：挡掉 `@..\..\x:e1` 这类路径穿越和 UNC。
-    let ok = sid.len() >= 2
-        && sid.len() <= 25
-        && sid.starts_with('s')
-        && sid[1..]
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-    if !ok {
+    if !store::is_valid_sid(sid) {
         return Err(DeskError::new("BAD_REF", format!("快照 id 不合法：{sid}"))
             .with_suggestion("ref 必须来自 `desk snap` 的输出"));
     }
@@ -45,6 +38,21 @@ pub fn resolve(uia: &Uia, ref_id: &str) -> Result<Resolved> {
         .cloned()
         .ok_or_else(|| DeskError::new("BAD_REF", format!("快照里没有这个 ref：{ref_id}")))?;
     let hwnd = win::parse_window_id(&snap.window_id)?;
+
+    // 窗口身份复核：HWND 会被系统回收，ref 不能因此落到另一个窗口的同位置元素上。
+    if snap.pid != 0
+        && let Some(info) = unsafe { win::describe(hwnd, true) }
+        && (info.pid != snap.pid || (!snap.class.is_empty() && info.class != snap.class))
+    {
+        return Err(DeskError::new(
+            "WINDOW_REUSED",
+            format!(
+                "快照对应的窗口已经关闭，这个窗口 id 被另一个进程复用了（{} -> {}）",
+                snap.title, info.title
+            ),
+        )
+        .with_suggestion("重新 `desk windows` + `desk snap`"));
+    }
 
     // UIPI 前置检查：无论走哪条路，只要目标比我们高就不动手。
     ensure_reachable(hwnd)?;
@@ -63,7 +71,7 @@ pub fn resolve(uia: &Uia, ref_id: &str) -> Result<Resolved> {
         });
     }
 
-    // 路径失效再按身份找，只有唯一匹配才继续。
+    // 路径失效再按身份+矩形找，只有唯一匹配才继续。
     let el = uia.locate(hwnd, &node, snap.raw_view)?;
     if let Some(fresh) = uia.rect_of(&el) {
         node.rect = fresh;
@@ -135,6 +143,11 @@ pub fn ensure_reachable(hwnd: HWND) -> Result<()> {
         .with_suggestion(
             "用管理员身份运行 DSH/终端；或 `desk elevate -- <同样的命令>` 以更高完整性重新执行",
         )),
+        Err((None, _)) => Err(DeskError::new(
+            "TOOL_TOKEN_UNREADABLE",
+            "读不到本进程的完整性级别，无法判断能不能投递消息；按 fail-closed 拒绝",
+        )
+        .with_suggestion("用普通交互式会话重新启动 desk；服务/Session 0 里无法做桌面自动化")),
         Err(_) => Err(DeskError::new(
             "TARGET_PROTECTED",
             format!(
@@ -147,19 +160,11 @@ pub fn ensure_reachable(hwnd: HWND) -> Result<()> {
     }
 }
 
-/// 执行一个动作并保持前台不变；返回值里带上"是否发生过抢占"。
-fn guarded<F, T>(f: F) -> (Result<T>, bool)
-where
-    F: FnOnce() -> Result<T>,
-{
-    input::with_foreground_guard(f)
+/// 执行一个动作并尽量保持前台不变；返回值里带上"是否发生过抢占"。
+fn guarded<T>(hwnd: HWND, f: impl FnOnce() -> Result<T>) -> (Result<T>, bool) {
+    input::with_foreground_guard(hwnd, f)
 }
 
-/// 调用 Invoke 并用选中状态回读确认。
-/// 列表项/页签这类元素有的程序把 Invoke 实现成空操作（PowerWriter 的芯片列表就是），
-/// 回读发现没选中就退回后台点击，避免"返回 ok 但界面没动"。
-/// 轮询直到状态变化（或超时），返回最后一次读到的值。
-/// 动作的验证方式：不同控件能回读的状态不一样，但"动作→回读→回退"这条策略只有一条。
 #[derive(Clone, Copy, PartialEq)]
 enum Verify {
     /// 没有可回读的状态（普通按钮、菜单项）：发完即返回，不补点。
@@ -189,7 +194,7 @@ fn poll_state(
 ///
 /// 所有"需要验证的动作"都走这一条：invoke/select/toggle 不再各写一份。
 fn act_verified<F>(
-    _uia: &Uia,
+    uia: &Uia,
     r: &Resolved,
     label: &str,
     verify: Verify,
@@ -199,44 +204,56 @@ fn act_verified<F>(
 where
     F: FnOnce() -> Result<()>,
 {
-    let unchanged = |before: Option<bool>, after: Option<bool>| match verify {
+    let passed = |before: Option<bool>, after: Option<bool>| match verify {
         Verify::None => true,
-        Verify::Becomes => after == Some(true) || before == Some(true),
+        // 只认"动作之后是选中"，before 已经选中不算成功——否则忽略 Invoke 的程序会被放过。
+        Verify::Becomes => after == Some(true),
         Verify::Flips => after != before,
     };
 
     // 没有可回读状态：信任语义动作，绝不补第二次点击（会变成点两下）。
     if matches!(verify, Verify::None) {
-        let (res, stolen) = guarded(act);
+        let (res, stolen) = guarded(win::parse_window_id(&r.window_id)?, act);
         res?;
         return Ok((format!("semantic:{label}"), stolen));
     }
     let before = read();
     if before.is_none() {
-        let (res, stolen) = guarded(act);
+        let (res, stolen) = guarded(win::parse_window_id(&r.window_id)?, act);
         res?;
         return Ok((format!("semantic:{label}"), stolen));
     }
 
-    let (res, mut stolen) = guarded(act);
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    let (res, mut stolen) = guarded(hwnd, act);
     res?;
-    let after = poll_state(&mut read, before, 150);
-    if unchanged(before, after) {
+    let after = poll_state(&mut read, before, 200);
+    if passed(before, after) {
         return Ok((format!("semantic:{label}"), stolen));
     }
 
     // 程序收下了但没生效：按元素矩形投一次后台点击，再回读。
-    let (x, y) = ensure_center(_uia, r)?;
-    let hwnd = win::parse_window_id(&r.window_id)?;
+    let (x, y) = ensure_center(uia, r)?;
     ensure_inside(hwnd, x, y)?;
-    let (res2, stolen2) = guarded(|| input::click_screen(hwnd, x, y, input::Button::Left));
-    res2?;
+    // 语义动作已经投递过，后面任何失败都不能标 retry=safe。
+    let (res2, stolen2) = guarded(hwnd, || {
+        input::click_screen(hwnd, x, y, input::Button::Left)
+    });
+    res2.map_err(|e| e.delivered())?;
     stolen |= stolen2;
-    let after2 = poll_state(&mut read, after, 150);
-    if unchanged(before, after2) {
+    let after2 = poll_state(&mut read, after, 200);
+    if passed(before, after2) {
         Ok((format!("bg:{label}-fallback"), stolen))
     } else {
-        Ok((format!("bg:{label}-unverified"), stolen))
+        Err(DeskError::new(
+            "ACTION_FAILED",
+            format!(
+                "语义动作和后台点击都没有让 {} 的状态变化（程序可能忽略了这个动作）",
+                r.node.label()
+            ),
+        )
+        .delivered()
+        .with_details(json!({"ref": r.node.ref_id, "mode": format!("bg:{label}-fallback")})))
     }
 }
 
@@ -281,6 +298,7 @@ fn toggle_verified(uia: &Uia, r: &Resolved) -> Result<(String, bool)> {
         || uia.toggle(&r.element),
     )
 }
+
 /// 取元素中心点；拿不到矩形（列表项未实例化/在视口外）就先滚进来再读。
 fn ensure_center(uia: &Uia, r: &Resolved) -> Result<(i32, i32)> {
     if !r.node.rect.is_empty() {
@@ -306,7 +324,7 @@ fn center(node: &Node) -> (i32, i32) {
     )
 }
 
-/// 点击：语义 → 后台注入 → （只有显式要求才）物理。
+/// 点击：语义 → 后台注入。
 pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
     let has = |a: &str| r.node.actions.iter().any(|x| x == a);
@@ -340,14 +358,30 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
             }
             return Ok(out);
         }
+        // 菜单/下拉/树节点只有 ExpandCollapse，没有 Invoke：用 expand 打开，
+        // 比按矩形投后台点击可靠（经典 Win32 菜单条还在非客户区，客户端坐标点不到）。
+        if has("expand") {
+            let hwnd = win::parse_window_id(&r.window_id)?;
+            let (res, stolen) = guarded(hwnd, || uia.expand(&r.element, true));
+            res?;
+            let mut out = json!({
+                "ref": ref_id, "mode": "semantic:expand", "actions": tried,
+                "element": {"role": r.node.role, "name": r.node.name},
+            });
+            if stolen {
+                out["focus_restored"] = json!(true);
+            }
+            return Ok(out);
+        }
     }
 
     // 语义路走不通：退回后台注入（不抢前台、不动光标）。
     let (x, y) = ensure_center(uia, &r)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
-    let (res, stolen) =
-        input::with_foreground_guard(|| input::click_screen(hwnd, x, y, input::Button::Left));
+    let (res, stolen) = guarded(hwnd, || {
+        input::click_screen(hwnd, x, y, input::Button::Left)
+    });
     res?;
     let mut out = json!({
         "ref": ref_id, "mode": if force_bg {"bg"} else {"bg:fallback"},
@@ -366,14 +400,50 @@ pub fn click(uia: &Uia, ref_id: &str, mode: Option<Mode>) -> Result<Value> {
     Ok(out)
 }
 
+/// 按屏幕坐标后台点击（UIA 读不到内容时的出口）。坐标必须落在目标客户区内。
+pub fn click_at(hwnd: HWND, x: i32, y: i32, button: input::Button) -> Result<Value> {
+    ensure_reachable(hwnd)?;
+    ensure_inside(hwnd, x, y)?;
+    let (res, stolen) = guarded(hwnd, || input::click_screen(hwnd, x, y, button));
+    res?;
+    let mut out = json!({
+        "mode": "bg:xy",
+        "button": match button { input::Button::Left => "left", input::Button::Right => "right" },
+        "at": {"x": x, "y": y},
+    });
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
+}
+
+pub fn double_click_at(hwnd: HWND, x: i32, y: i32) -> Result<Value> {
+    ensure_reachable(hwnd)?;
+    ensure_inside(hwnd, x, y)?;
+    let (res, stolen) = guarded(hwnd, || input::double_click_screen(hwnd, x, y));
+    res?;
+    let mut out = json!({"mode": "bg:xy-double", "at": {"x": x, "y": y}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
+}
+
 /// 右键 / 双击：只走后台注入（语义层没有这两个动作）。
 pub fn right_click(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
     let (x, y) = ensure_center(uia, &r)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
-    input::click_screen(hwnd, x, y, input::Button::Right)?;
-    Ok(json!({"ref": ref_id, "mode": "bg:right", "at": {"x": x, "y": y}}))
+    let (res, stolen) = guarded(hwnd, || {
+        input::click_screen(hwnd, x, y, input::Button::Right)
+    });
+    res?;
+    let mut out = json!({"ref": ref_id, "mode": "bg:right", "at": {"x": x, "y": y}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn double_click(uia: &Uia, ref_id: &str) -> Result<Value> {
@@ -381,8 +451,13 @@ pub fn double_click(uia: &Uia, ref_id: &str) -> Result<Value> {
     let (x, y) = ensure_center(uia, &r)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     ensure_inside(hwnd, x, y)?;
-    input::double_click_screen(hwnd, x, y)?;
-    Ok(json!({"ref": ref_id, "mode": "bg:double", "at": {"x": x, "y": y}}))
+    let (res, stolen) = guarded(hwnd, || input::double_click_screen(hwnd, x, y));
+    res?;
+    let mut out = json!({"ref": ref_id, "mode": "bg:double", "at": {"x": x, "y": y}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 /// 单个元素的完整信息（调试和精确定位用）。
@@ -392,6 +467,11 @@ pub fn info(uia: &Uia, ref_id: &str) -> Result<Value> {
         .ok()
         .map(|h| format!("{:x}", h.0 as usize))
         .unwrap_or_default();
+    let value = if r.node.password {
+        Some("***".to_string())
+    } else {
+        uia.value_of(&r.element)
+    };
     Ok(json!({
         "ref": ref_id,
         "role": r.node.role,
@@ -400,7 +480,10 @@ pub fn info(uia: &Uia, ref_id: &str) -> Result<Value> {
         "class": r.node.class_name,
         "rect": {"x": r.node.rect.x, "y": r.node.rect.y, "w": r.node.rect.width, "h": r.node.rect.height},
         "actions": r.node.actions,
-        "value": uia.value_of(&r.element),
+        "value": value,
+        "password": r.node.password,
+        "checked": r.node.checked,
+        "selected": r.node.selected,
         "focused": unsafe { r.element.CurrentHasKeyboardFocus() }.map(|b| b.as_bool()).unwrap_or(false),
         "keyboard_focusable": unsafe { r.element.CurrentIsKeyboardFocusable() }.map(|b| b.as_bool()).unwrap_or(false),
         "native_hwnd": native,
@@ -414,7 +497,8 @@ pub fn info(uia: &Uia, ref_id: &str) -> Result<Value> {
 
 pub fn scroll_into_view(uia: &Uia, ref_id: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (res, _stolen) = guarded(|| uia.scroll_into_view(&r.element));
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    let (res, _stolen) = guarded(hwnd, || uia.scroll_into_view(&r.element));
     res?;
     Ok(json!({"ref": ref_id, "mode": "semantic:scrollinto",
         "element": {"role": r.node.role, "name": r.node.name}}))
@@ -444,14 +528,24 @@ pub fn toggle(uia: &Uia, ref_id: &str) -> Result<Value> {
 
 pub fn set_value(uia: &Uia, ref_id: &str, value: &str) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (res, stolen) = guarded(|| uia.set_value(&r.element, value));
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    let (res, stolen) = guarded(hwnd, || uia.set_value(&r.element, value));
     res?;
-    let after = uia.value_of(&r.element);
-    // 回读确认：程序可能忽略、截断或格式化写入的值。
+    // 密码框不回读明文，只报"写入成功/无法回读"。
+    let after = if r.node.password {
+        None
+    } else {
+        uia.value_of(&r.element)
+    };
     let matches = after.as_deref() == Some(value);
     let mut out = json!({"ref": ref_id, "mode": "semantic:set", "value": after,
-        "value_matches": matches,
+        "value_matches": matches, "password": r.node.password,
         "element": {"role": r.node.role, "name": r.node.name}});
+    if let Some(prev) = &r.node.value
+        && r.node.password
+    {
+        out["previous_had_value"] = json!(!prev.is_empty());
+    }
     if stolen {
         out["focus_restored"] = json!(true);
     }
@@ -460,9 +554,11 @@ pub fn set_value(uia: &Uia, ref_id: &str, value: &str) -> Result<Value> {
 
 pub fn expand(uia: &Uia, ref_id: &str, open: bool) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
-    let (res, stolen) = guarded(|| uia.expand(&r.element, open));
+    let hwnd = win::parse_window_id(&r.window_id)?;
+    let (res, stolen) = guarded(hwnd, || uia.expand(&r.element, open));
     res?;
-    let mut out = json!({"ref": ref_id, "mode": if open {"expand"} else {"collapse"},
+    let mut out = json!({"ref": ref_id,
+        "mode": if open {"semantic:expand"} else {"semantic:collapse"},
         "element": {"role": r.node.role, "name": r.node.name}});
     if stolen {
         out["focus_restored"] = json!(true);
@@ -473,9 +569,25 @@ pub fn expand(uia: &Uia, ref_id: &str, open: bool) -> Result<Value> {
 /// 后台键盘 / 文本：直接发给窗口，不抢前台。
 pub fn key(hwnd: HWND, combo: &str) -> Result<Value> {
     ensure_reachable(hwnd)?;
-    let (res, stolen) = input::with_foreground_guard(|| input::key_combo(hwnd, combo));
+    let (res, stolen) = guarded(hwnd, || input::key_combo(hwnd, combo));
     res?;
-    let mut out = json!({"mode": "bg:key", "combo": combo});
+    let has_modifier = combo.split('+').any(|p| {
+        matches!(
+            p.trim().to_ascii_lowercase().as_str(),
+            "ctrl" | "control" | "alt" | "shift" | "win" | "meta"
+        )
+    });
+    let mut out = json!({
+        "mode": "bg:key",
+        "combo": combo,
+        // 投递的是窗口消息，不经过目标线程的键盘状态机；带修饰键时是否触发由目标决定。
+        "effective": if has_modifier { "unverified" } else { "delivered" },
+    });
+    if has_modifier {
+        out["warning"] = json!(
+            "带 ctrl/alt/shift/win 的快捷键依赖目标线程键盘状态，投递方式通常不触发；需要可靠快捷键时改用元素动作或 set/type"
+        );
+    }
     if stolen {
         out["focus_restored"] = json!(true);
     }
@@ -484,9 +596,10 @@ pub fn key(hwnd: HWND, combo: &str) -> Result<Value> {
 
 pub fn type_text(hwnd: HWND, text: &str) -> Result<Value> {
     ensure_reachable(hwnd)?;
-    let (res, stolen) = input::with_foreground_guard(|| input::type_text(hwnd, text));
+    let (res, stolen) = guarded(hwnd, || input::type_text(hwnd, text));
     res?;
-    let mut out = json!({"mode": "bg:type", "chars": text.chars().count()});
+    let mut out =
+        json!({"mode": "bg:type", "chars": text.chars().count(), "effective": "delivered"});
     if stolen {
         out["focus_restored"] = json!(true);
     }
@@ -498,7 +611,8 @@ pub fn scroll_ref(uia: &Uia, ref_id: &str, delta: i32) -> Result<Value> {
     let r = resolve(uia, ref_id)?;
     let hwnd = win::parse_window_id(&r.window_id)?;
     let (x, y) = ensure_center(uia, &r)?;
-    let (res, stolen) = guarded(|| input::wheel_screen(hwnd, x, y, delta));
+    ensure_inside(hwnd, x, y)?;
+    let (res, stolen) = guarded(hwnd, || input::wheel_screen(hwnd, x, y, delta));
     res?;
     let mut out = json!({
         "ref": ref_id, "mode": "bg:scroll", "delta": delta,
@@ -513,28 +627,42 @@ pub fn scroll_ref(uia: &Uia, ref_id: &str, delta: i32) -> Result<Value> {
 
 pub fn wheel(hwnd: HWND, x: i32, y: i32, delta: i32) -> Result<Value> {
     ensure_reachable(hwnd)?;
-    let (res, _stolen) = input::with_foreground_guard(|| input::wheel_screen(hwnd, x, y, delta));
+    ensure_inside(hwnd, x, y)?;
+    let (res, stolen) = guarded(hwnd, || input::wheel_screen(hwnd, x, y, delta));
     res?;
-    Ok(json!({"mode": "bg:wheel", "delta": delta}))
+    let mut out = json!({"mode": "bg:wheel", "delta": delta, "at": {"x": x, "y": y}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 pub fn drag(hwnd: HWND, from: (i32, i32), to: (i32, i32)) -> Result<Value> {
     ensure_reachable(hwnd)?;
-    let (res, _stolen) = guarded(|| input::drag_screen(hwnd, from, to, 24));
+    let (res, stolen) = guarded(hwnd, || input::drag_screen(hwnd, from, to, 24));
     res?;
-    Ok(json!({"mode": "bg:drag", "from": {"x": from.0, "y": from.1}, "to": {"x": to.0, "y": to.1}}))
+    let mut out = json!({"mode": "bg:drag", "from": {"x": from.0, "y": from.1}, "to": {"x": to.0, "y": to.1}});
+    if stolen {
+        out["focus_restored"] = json!(true);
+    }
+    Ok(out)
 }
 
 /// 快照 + 落盘，返回给 CLI 的 JSON。
+///
+/// `persist=false` 时**不**返回 snapshot_id/ref：那些 ref 没有落盘，拿去解析只会得到
+/// SNAPSHOT_NOT_FOUND。wait 之类只需要读内容的调用方用这个模式。
 pub fn snap(uia: &Uia, hwnd: HWND, opts: &WalkOptions, persist: bool) -> Result<Value> {
     let info = unsafe { win::describe(hwnd, true) }
         .ok_or_else(|| DeskError::new("WINDOW_GONE", "目标窗口已消失"))?;
     let sid = store::new_id();
-    let nodes = uia.snapshot(hwnd, &sid, opts)?;
+    let (nodes, stats) = uia.snapshot(hwnd, &sid, opts)?;
     let file = store::SnapshotFile {
         id: sid.clone(),
         window_id: info.id.clone(),
         title: info.title.clone(),
+        pid: info.pid,
+        class: info.class.clone(),
         created_ms: now_ms(),
         nodes,
         raw_view: opts.raw_view,
@@ -542,25 +670,27 @@ pub fn snap(uia: &Uia, hwnd: HWND, opts: &WalkOptions, persist: bool) -> Result<
     if persist {
         store::save(&file)?;
     }
-    let elements: Vec<Value> = file.nodes.iter().map(compact).collect();
-    let truncated = file.nodes.len() >= opts.limit;
+    let elements: Vec<Value> = file.nodes.iter().map(|n| compact(n, persist)).collect();
     Ok(json!({
-        "snapshot_id": sid,
+        "snapshot_id": if persist { json!(sid) } else { Value::Null },
+        "temporary": !persist,
         "window": {"id": info.id, "title": info.title, "exe": info.exe},
         "count": file.nodes.len(),
-        "truncated": truncated,
+        "truncated": stats.truncated(),
         "elements": elements,
     }))
 }
 
-fn compact(n: &Node) -> Value {
+fn compact(n: &Node, with_ref: bool) -> Value {
     let mut o = json!({
-        "ref": n.ref_id,
         "role": n.role,
         "name": n.name,
         "depth": n.depth,
         "actions": n.actions,
     });
+    if with_ref {
+        o["ref"] = json!(n.ref_id);
+    }
     if !n.rect.is_empty() {
         o["rect"] = json!({"x": n.rect.x, "y": n.rect.y, "w": n.rect.width, "h": n.rect.height});
     }
@@ -569,6 +699,15 @@ fn compact(n: &Node) -> Value {
     }
     if let Some(v) = &n.value {
         o["value"] = json!(v);
+    }
+    if let Some(c) = n.checked {
+        o["checked"] = json!(c);
+    }
+    if let Some(s) = n.selected {
+        o["selected"] = json!(s);
+    }
+    if n.password {
+        o["password"] = json!(true);
     }
     if !n.enabled {
         o["enabled"] = json!(false);

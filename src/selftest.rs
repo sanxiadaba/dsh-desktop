@@ -301,7 +301,7 @@ pub fn run() -> Result<Value> {
 
     // 5) 窗口枚举能看到它。
     let id = win::window_id(hwnd);
-    let found = win::enum_windows().into_iter().any(|w| w.id == id);
+    let found = win::enum_windows(false).into_iter().any(|w| w.id == id);
     check("windows_enum", "found", format!("id={id}"), found);
 
     // 6) 截图非空。

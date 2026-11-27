@@ -14,18 +14,20 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationElement,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest, IUIAutomationElement,
     IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
     IUIAutomationLegacyIAccessiblePattern, IUIAutomationScrollItemPattern,
     IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
     IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_AutomationIdPropertyId,
     UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
     UIA_ExpandCollapsePatternId, UIA_HasKeyboardFocusPropertyId, UIA_InvokePatternId,
-    UIA_IsEnabledPropertyId, UIA_IsOffscreenPropertyId, UIA_LegacyIAccessiblePatternId,
-    UIA_NamePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
-    UIA_ToggleToggleStatePropertyId, UIA_ValuePatternId, UIA_ValueValuePropertyId,
+    UIA_IsEnabledPropertyId, UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId,
+    UIA_LegacyIAccessiblePatternId, UIA_NamePropertyId, UIA_ScrollItemPatternId,
+    UIA_ScrollPatternId, UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId,
+    UIA_TogglePatternId, UIA_ToggleToggleStatePropertyId, UIA_ValuePatternId,
+    UIA_ValueValuePropertyId,
 };
+use windows::core::Interface;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
@@ -42,6 +44,9 @@ pub struct Node {
     pub checked: Option<bool>,
     #[serde(default)]
     pub selected: Option<bool>,
+    /// 密码框：value 已被替换成 `***`，不落明文。
+    #[serde(default)]
+    pub password: bool,
     pub enabled: bool,
     pub offscreen: bool,
     pub focused: bool,
@@ -64,20 +69,24 @@ fn rect_from(r: RECT) -> Rect {
     Rect {
         x: r.left,
         y: r.top,
-        width: r.right - r.left,
-        height: r.bottom - r.top,
+        width: r.right.saturating_sub(r.left),
+        height: r.bottom.saturating_sub(r.top),
     }
 }
 
 fn overlap_ratio(a: &Rect, b: &Rect) -> f32 {
-    let x = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
-    let y = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
+    let ax2 = a.x as i64 + a.width as i64;
+    let ay2 = a.y as i64 + a.height as i64;
+    let bx2 = b.x as i64 + b.width as i64;
+    let by2 = b.y as i64 + b.height as i64;
+    let x = ax2.min(bx2) - (a.x as i64).max(b.x as i64);
+    let y = ay2.min(by2) - (a.y as i64).max(b.y as i64);
     if x <= 0 || y <= 0 {
         return 0.0;
     }
     let inter = (x * y) as f32;
-    let area_a = (a.width.max(1) * a.height.max(1)) as f32;
-    let area_b = (b.width.max(1) * b.height.max(1)) as f32;
+    let area_a = (a.width.max(1) as i64 * a.height.max(1) as i64) as f32;
+    let area_b = (b.width.max(1) as i64 * b.height.max(1) as i64) as f32;
     inter / area_a.min(area_b)
 }
 
@@ -149,6 +158,20 @@ impl Default for WalkOptions {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WalkStats {
+    /// 还有元素没放进结果（--limit 截断）。
+    pub cut_by_limit: bool,
+    /// 触到 --depth 上限，且边界节点还有子元素。
+    pub cut_by_depth: bool,
+}
+
+impl WalkStats {
+    pub fn truncated(&self) -> bool {
+        self.cut_by_limit || self.cut_by_depth
+    }
+}
+
 impl Uia {
     pub fn new() -> Result<Self> {
         unsafe {
@@ -158,6 +181,11 @@ impl Uia {
                     DeskError::new("UIA_INIT", format!("初始化 UIA 失败：{e}"))
                         .with_suggestion("确认当前会话是可交互桌面（不是服务、锁屏或 Session 0）")
                 })?;
+            // 给 UIA 的跨进程调用装上限：目标挂死时调用本身会一直等，看门狗只能杀进程。
+            if let Ok(a2) = automation.cast::<IUIAutomation2>() {
+                let _ = a2.SetConnectionTimeout(2_000);
+                let _ = a2.SetTransactionTimeout(5_000);
+            }
             let cache = automation
                 .CreateCacheRequest()
                 .map_err(|e| DeskError::new("UIA_INIT", format!("创建缓存请求失败：{e}")))?;
@@ -168,13 +196,16 @@ impl Uia {
                 UIA_ControlTypePropertyId,
                 UIA_IsEnabledPropertyId,
                 UIA_IsOffscreenPropertyId,
+                UIA_IsPasswordPropertyId,
                 UIA_BoundingRectanglePropertyId,
                 UIA_HasKeyboardFocusPropertyId,
                 UIA_ValueValuePropertyId,
                 UIA_SelectionItemIsSelectedPropertyId,
                 UIA_ToggleToggleStatePropertyId,
             ] {
-                let _ = cache.AddProperty(id);
+                cache.AddProperty(id).map_err(|e| {
+                    DeskError::new("UIA_INIT", format!("UIA 缓存注册属性失败：{e}"))
+                })?;
             }
             for id in [
                 UIA_InvokePatternId,
@@ -186,7 +217,9 @@ impl Uia {
                 UIA_ScrollItemPatternId,
                 UIA_LegacyIAccessiblePatternId,
             ] {
-                let _ = cache.AddPattern(id);
+                cache.AddPattern(id).map_err(|e| {
+                    DeskError::new("UIA_INIT", format!("UIA 缓存注册 pattern 失败：{e}"))
+                })?;
             }
             Ok(Self { automation, cache })
         }
@@ -212,16 +245,24 @@ impl Uia {
     }
 
     /// 整棵树的扁平快照，ref 形如 `@<sid>:eN`。
-    pub fn snapshot(&self, hwnd: HWND, sid: &str, opts: &WalkOptions) -> Result<Vec<Node>> {
+    pub fn snapshot(
+        &self,
+        hwnd: HWND,
+        sid: &str,
+        opts: &WalkOptions,
+    ) -> Result<(Vec<Node>, WalkStats)> {
         let root = self.element_from_handle(hwnd)?;
         let walker = self.walker(opts.raw_view)?;
         let mut out = Vec::new();
         let mut path = Vec::new();
-        self.walk(&walker, &root, 0, &mut path, sid, opts, &mut out);
-        Ok(out)
+        let mut stats = WalkStats::default();
+        self.walk(
+            &walker, &root, 0, &mut path, sid, opts, &mut out, &mut stats,
+        );
+        Ok((out, stats))
     }
 
-    // 遍历要同时带 walker、路径、sid、选项和输出，参数多是刻意的。
+    // 遍历要同时带 walker、路径、sid、选项、输出和统计，参数多是刻意的。
     #[allow(clippy::too_many_arguments)]
     fn walk(
         &self,
@@ -232,14 +273,16 @@ impl Uia {
         sid: &str,
         opts: &WalkOptions,
         out: &mut Vec<Node>,
+        stats: &mut WalkStats,
     ) -> usize {
-        if depth >= opts.max_depth || out.len() >= opts.limit {
+        if depth >= opts.max_depth {
             return 0;
         }
         let mut seen = 0usize;
         let mut child = unsafe { walker.GetFirstChildElementBuildCache(parent, &self.cache) };
         while let Ok(el) = child {
             if out.len() >= opts.limit {
+                stats.cut_by_limit = true;
                 break;
             }
             let index = seen as u32;
@@ -248,9 +291,16 @@ impl Uia {
             let node = self.describe(&el, depth + 1, path.clone(), out.len(), sid);
             let slot = out.len();
             out.push(node);
-            let kids = self.walk(walker, &el, depth + 1, path, sid, opts, out);
-            if let Some(n) = out.get_mut(slot) {
-                n.children = kids;
+            if depth + 1 >= opts.max_depth {
+                // 这个节点本身收下了，但它的子元素收不到：探一次，确实有子元素才算截断。
+                if unsafe { walker.GetFirstChildElementBuildCache(&el, &self.cache) }.is_ok() {
+                    stats.cut_by_depth = true;
+                }
+            } else {
+                let kids = self.walk(walker, &el, depth + 1, path, sid, opts, out, stats);
+                if let Some(n) = out.get_mut(slot) {
+                    n.children = kids;
+                }
             }
             path.pop();
             child = unsafe { walker.GetNextSiblingElementBuildCache(&el, &self.cache) };
@@ -295,6 +345,15 @@ impl Uia {
             .unwrap_or(false);
 
         let (actions, value, checked, selected) = self.patterns(el);
+        let password = unsafe { el.CachedIsPassword() }
+            .map(|b| b.as_bool())
+            .unwrap_or(false);
+        // 密码框：值不采集、不落盘、不给 agent。只保留"这里有值"这一位信息。
+        let value = if password {
+            value.map(|_| "***".to_string())
+        } else {
+            value
+        };
         Node {
             ref_id: format!("@{sid}:e{}", seq + 1),
             role: role_name(control_type).to_string(),
@@ -306,6 +365,7 @@ impl Uia {
             value,
             checked,
             selected,
+            password,
             enabled,
             offscreen,
             focused,
@@ -330,8 +390,9 @@ impl Uia {
             {
                 out.push("click".to_string());
             }
-            if let Ok(p) = el
+            if el
                 .GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
+                .is_ok()
             {
                 out.push("select".to_string());
                 selected = el
@@ -341,9 +402,10 @@ impl Uia {
                     .ok()
                     .and_then(|live| live.CurrentIsSelected().ok())
                     .map(|b| b.as_bool());
-                let _ = &p;
             }
-            if let Ok(p) = el.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+            if el
+                .GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                .is_ok()
             {
                 out.push("toggle".to_string());
                 checked = el
@@ -351,14 +413,13 @@ impl Uia {
                     .ok()
                     .and_then(|live| live.CurrentToggleState().ok())
                     .map(|s| s.0 == 1);
-                let _ = &p;
             }
             if el
                 .GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                 .is_ok()
             {
                 out.push("set".to_string());
-                // 值也读实时：切页后缓存值会变成空的。
+                // 值读实时：切页后缓存值会变成空的。
                 value = el
                     .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                     .ok()
@@ -470,38 +531,33 @@ impl Uia {
     }
 
     /// 界面变了以后按 (角色, automation_id/名字, 矩形重叠) 重新定位，要求唯一。
+    ///
+    /// 只在"旧矩形附近恰好一个"时才认，避免同名同 id 的兄弟元素被静默顶替。
     pub fn locate(&self, hwnd: HWND, node: &Node, raw_view: bool) -> Result<IUIAutomationElement> {
         let root = self.element_from_handle(hwnd)?;
         let walker = self.walker(raw_view)?;
         let mut hits: Vec<(IUIAutomationElement, Rect)> = Vec::new();
-        self.collect(&walker, &root, node, &mut hits, 0);
-        match hits.len() {
-            1 => Ok(hits.remove(0).0),
-            0 => Err(DeskError::new(
+        let mut total = 0usize;
+        self.collect(&walker, &root, node, &mut hits, &mut total, 0);
+        if hits.len() == 1 {
+            return Ok(hits.remove(0).0);
+        }
+        if hits.is_empty() && total == 0 {
+            return Err(DeskError::new(
                 "STALE_REF",
                 format!("界面已变化，找不到 {} 这个元素了", node.label()),
             )
-            .with_suggestion("重新 `desk snap` 再操作")),
-            _ => {
-                let near: Vec<_> = hits
-                    .iter()
-                    .filter(|(_, r)| overlap_ratio(r, &node.rect) > 0.3)
-                    .collect();
-                if near.len() == 1 {
-                    Ok(near[0].0.clone())
-                } else {
-                    Err(DeskError::new(
-                        "AMBIGUOUS_TARGET",
-                        format!(
-                            "窗口里有 {} 个同名元素，无法确定是哪一个（{}）",
-                            hits.len(),
-                            node.label()
-                        ),
-                    )
-                    .with_suggestion("重新 `desk snap`，用新的 ref 精确指定"))
-                }
-            }
+            .with_suggestion("重新 `desk snap` 再操作"));
         }
+        Err(DeskError::new(
+            "AMBIGUOUS_TARGET",
+            format!(
+                "窗口里有 {} 个同名元素，没法确定是哪一个（{}）",
+                total.max(hits.len()),
+                node.label()
+            ),
+        )
+        .with_suggestion("重新 `desk snap`，用新的 ref 精确指定"))
     }
 
     fn collect(
@@ -510,14 +566,16 @@ impl Uia {
         parent: &IUIAutomationElement,
         want: &Node,
         out: &mut Vec<(IUIAutomationElement, Rect)>,
+        total: &mut usize,
         depth: usize,
     ) {
-        if depth > 32 || out.len() > 8 {
+        if depth > 32 {
             return;
         }
         let mut child = unsafe { walker.GetFirstChildElement(parent) };
         while let Ok(el) = child {
             if self.identity_ok(&el, want) {
+                *total += 1;
                 let rect = unsafe { el.CurrentBoundingRectangle() }
                     .map(rect_from)
                     .unwrap_or(Rect {
@@ -526,9 +584,13 @@ impl Uia {
                         width: 0,
                         height: 0,
                     });
-                out.push((el.clone(), rect));
+                // 快照里的矩形为空（元素在视口外）时不做位置过滤，交给唯一性判定。
+                let near = want.rect.is_empty() || overlap_ratio(&rect, &want.rect) > 0.3;
+                if near && out.len() < 8 {
+                    out.push((el.clone(), rect));
+                }
             }
-            self.collect(walker, &el, want, out, depth + 1);
+            self.collect(walker, &el, want, out, total, depth + 1);
             child = unsafe { walker.GetNextSiblingElement(&el) };
         }
     }

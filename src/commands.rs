@@ -1,6 +1,6 @@
 //! 命令表：**唯一**的命令清单。
 //!
-//! 所有"这条命令要不要管理员、会不会改变前台、帮助里怎么列"都从这里取，
+//! 所有"这条命令要不要管理员、会不会改变前台、要不要在动作后做观测"都从这里取，
 //! 不允许在别处再写一份按命令名分支的清单——那就是特例，迟早漂移。
 //!
 //! 增加命令时只改这里 + `main.rs` 的 dispatch；测试会检查两边是否对得上。
@@ -13,8 +13,8 @@ pub struct CmdSpec {
     pub needs_admin: bool,
     /// 这条命令是否可能让别的窗口抢到前台、并需要事后还原。
     ///
-    /// `launch` 为 true：启动的新程序常常自己激活，必须还原。
-    /// 其余命令靠"当前前台是不是这次碰过的窗口"判断，不需要这个开关。
+    /// 只有 `launch` 曾需要它；现在 launch 走 SW_SHOWNOACTIVATE 且不强制还原，
+    /// 字段保留是为了将来有命令明确需要"任何前台变化都还原"。
     pub restore_any_foreground: bool,
 }
 
@@ -33,6 +33,7 @@ pub const COMMANDS: &[CmdSpec] = &[
     cmd("elevate", false),
     // 观察
     cmd("windows", true),
+    cmd("doctor", true),
     cmd("snap", true),
     cmd("find", true),
     cmd("info", true),
@@ -66,11 +67,7 @@ pub const COMMANDS: &[CmdSpec] = &[
     cmd("guard", true),
     cmd("run", true),
     cmd("selftest", true),
-    CmdSpec {
-        name: "launch",
-        needs_admin: true,
-        restore_any_foreground: true,
-    },
+    cmd("launch", true),
     // focus 已禁用，保留名字是为了给出明确的 DISABLED，而不是"未知命令"。
     cmd("focus", true),
 ];
@@ -85,4 +82,26 @@ pub fn needs_admin(name: &str) -> bool {
 
 pub fn restore_any_foreground(name: &str) -> bool {
     get(name).map(|c| c.restore_any_foreground).unwrap_or(false)
+}
+
+/// 会改变目标界面、值得在动作后回一份观测的命令。
+pub fn mutates(name: &str) -> bool {
+    matches!(
+        name,
+        "click"
+            | "rclick"
+            | "dclick"
+            | "select"
+            | "toggle"
+            | "set"
+            | "expand"
+            | "collapse"
+            | "scrollitem"
+            | "scrollinto"
+            | "scroll"
+            | "wheel"
+            | "drag"
+            | "key"
+            | "type"
+    )
 }
