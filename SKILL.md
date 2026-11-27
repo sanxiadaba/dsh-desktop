@@ -1,4 +1,4 @@
----
+﻿---
 name: desktop
 description: >
   Control Windows desktop applications without stealing the user's screen:
@@ -67,7 +67,7 @@ $s.data.elements | Select-Object ref, role, name, actions, checked | Format-Tabl
 # 4. 动手（ref 必须来自本次输出）
 $ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object -First 1).ref
 $r = & $desk click $ref --window $win.id | ConvertFrom-Json
-$r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么（额外 30–600 ms 树遍历）
+$r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么（额外 30 ms 起，Electron 大树约 2 s）
 
 # 5. 需要新 ref 才再 snap；不需要就直接继续
 ```
