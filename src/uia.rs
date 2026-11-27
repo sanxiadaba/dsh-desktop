@@ -13,6 +13,7 @@ use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
+use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayDestroy, SafeArrayUnaccessData};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationCacheRequest, IUIAutomationElement,
     IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
@@ -50,6 +51,9 @@ pub struct Node {
     pub enabled: bool,
     pub offscreen: bool,
     pub focused: bool,
+    /// UIA RuntimeId：元素生命周期内稳定，比 role+name+rect 更能区分"同名兄弟"。
+    #[serde(default)]
+    pub runtime_id: Vec<i32>,
     pub depth: usize,
     pub path: Vec<u32>,
     pub children: usize,
@@ -254,11 +258,46 @@ impl Uia {
         let root = self.element_from_handle(hwnd)?;
         let walker = self.walker(opts.raw_view)?;
         let mut out = Vec::new();
+        let mut elements: Vec<IUIAutomationElement> = Vec::new();
         let mut path = Vec::new();
         let mut stats = WalkStats::default();
         self.walk(
-            &walker, &root, 0, &mut path, sid, opts, &mut out, &mut stats,
+            &walker,
+            &root,
+            0,
+            &mut path,
+            sid,
+            opts,
+            &mut out,
+            &mut elements,
+            &mut stats,
         );
+        // 只给"同指纹重复"的元素取 RuntimeId：它们才需要区分同名兄弟，
+        // 唯一元素用 role+id/name 就够，避免为每个元素多打一次跨进程调用。
+        let mut groups: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, n) in out.iter().enumerate() {
+            // 只关心"能动手的元素"：文本/面板重复与否不影响 ref 解析。
+            if n.actions.is_empty() {
+                continue;
+            }
+            let id = if n.automation_id.is_empty() {
+                &n.name
+            } else {
+                &n.automation_id
+            };
+            groups
+                .entry(format!("{}|{}|{}", n.role, id, n.class_name))
+                .or_default()
+                .push(i);
+        }
+        for idxs in groups.values().filter(|v| v.len() > 1) {
+            for &i in idxs {
+                if let Some(el) = elements.get(i) {
+                    out[i].runtime_id = self.runtime_id_of(el);
+                }
+            }
+        }
         Ok((out, stats))
     }
 
@@ -273,6 +312,7 @@ impl Uia {
         sid: &str,
         opts: &WalkOptions,
         out: &mut Vec<Node>,
+        elements: &mut Vec<IUIAutomationElement>,
         stats: &mut WalkStats,
     ) -> usize {
         if depth >= opts.max_depth {
@@ -291,13 +331,24 @@ impl Uia {
             let node = self.describe(&el, depth + 1, path.clone(), out.len(), sid);
             let slot = out.len();
             out.push(node);
+            elements.push(el.clone());
             if depth + 1 >= opts.max_depth {
                 // 这个节点本身收下了，但它的子元素收不到：探一次，确实有子元素才算截断。
                 if unsafe { walker.GetFirstChildElementBuildCache(&el, &self.cache) }.is_ok() {
                     stats.cut_by_depth = true;
                 }
             } else {
-                let kids = self.walk(walker, &el, depth + 1, path, sid, opts, out, stats);
+                let kids = self.walk(
+                    walker,
+                    &el,
+                    depth + 1,
+                    path,
+                    sid,
+                    opts,
+                    out,
+                    elements,
+                    stats,
+                );
                 if let Some(n) = out.get_mut(slot) {
                     n.children = kids;
                 }
@@ -369,9 +420,36 @@ impl Uia {
             enabled,
             offscreen,
             focused,
+            runtime_id: Vec::new(),
             depth,
             path,
             children: 0,
+        }
+    }
+
+    /// 元素的 UIA RuntimeId（取不到就空）。
+    pub fn runtime_id_of(&self, el: &IUIAutomationElement) -> Vec<i32> {
+        unsafe {
+            let Ok(psa) = el.GetRuntimeId() else {
+                return Vec::new();
+            };
+            if psa.is_null() {
+                return Vec::new();
+            }
+            let arr = &*psa;
+            let n = arr.rgsabound[0].cElements as usize;
+            let mut out = Vec::new();
+            let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+            let acc = SafeArrayAccessData(psa, &mut data);
+            if acc.is_ok() && !data.is_null() {
+                let p = data as *const i32;
+                for i in 0..n.min(32) {
+                    out.push(*p.add(i));
+                }
+                let _ = SafeArrayUnaccessData(psa);
+            }
+            let _ = SafeArrayDestroy(psa);
+            out
         }
     }
 
@@ -477,23 +555,23 @@ impl Uia {
             }
             cur = child;
         }
-        if self.identity_ok(&cur, node) && self.rect_matches(&cur, node) {
+        if self.identity_strong(&cur, node) {
             Some(cur)
         } else {
             None
         }
     }
 
-    /// 快照里的矩形（已按窗口位移平移）和当前矩形是否落在同一块区域。
-    /// 同名同 id 的兄弟被删掉后，路径会指到邻居，这一步必须把它拦下来。
-    fn rect_matches(&self, el: &IUIAutomationElement, node: &Node) -> bool {
-        if node.rect.is_empty() {
-            return true;
-        }
-        let Some(cur) = self.rect_of(el) else {
+    /// 身份判定：有 RuntimeId 就只认 RuntimeId（窗口移动/缩放/列表插入都不影响）；
+    /// 唯一元素只比身份，不再看矩形。
+    fn identity_strong(&self, el: &IUIAutomationElement, node: &Node) -> bool {
+        if !self.identity_ok(el, node) {
             return false;
-        };
-        overlap_ratio(&cur, &node.rect) > 0.5
+        }
+        if !node.runtime_id.is_empty() {
+            return self.runtime_id_of(el) == node.runtime_id;
+        }
+        true
     }
 
     fn identity_ok(&self, el: &IUIAutomationElement, node: &Node) -> bool {
@@ -551,14 +629,22 @@ impl Uia {
         let mut hits: Vec<(IUIAutomationElement, Rect)> = Vec::new();
         let mut total = 0usize;
         self.collect(&walker, &root, node, &mut hits, &mut total, 0);
-        if hits.len() == 1 {
+        // 身份在这个窗口里唯一：位置变了也认它（resize/滚动/插入兄弟都不会误杀）。
+        if total == 1 && hits.len() == 1 {
             return Ok(hits.remove(0).0);
+        }
+        let near: Vec<_> = hits
+            .iter()
+            .filter(|(_, r)| node.rect.is_empty() || overlap_ratio(r, &node.rect) > 0.3)
+            .collect();
+        if near.len() == 1 {
+            return Ok(near[0].0.clone());
         }
         if hits.is_empty() {
             return Err(DeskError::new(
                 "STALE_REF",
                 format!(
-                    "界面已变化，找不到位置一致的 {}（窗口里有 {} 个同名元素）",
+                    "界面已变化，找不到位置一致的 {}（窗口里有 {} 个同身份元素）",
                     node.label(),
                     total
                 ),
@@ -591,19 +677,22 @@ impl Uia {
         let mut child = unsafe { walker.GetFirstChildElement(parent) };
         while let Ok(el) = child {
             if self.identity_ok(&el, want) {
-                *total += 1;
-                let rect = unsafe { el.CurrentBoundingRectangle() }
-                    .map(rect_from)
-                    .unwrap_or(Rect {
-                        x: 0,
-                        y: 0,
-                        width: 0,
-                        height: 0,
-                    });
-                // 快照里的矩形为空（元素在视口外）时不做位置过滤，交给唯一性判定。
-                let near = want.rect.is_empty() || overlap_ratio(&rect, &want.rect) > 0.3;
-                if near && out.len() < 8 {
-                    out.push((el.clone(), rect));
+                // 快照里存了 RuntimeId 就必须一致：同名兄弟被删时，幸存者不能被当成原元素。
+                let rt_ok =
+                    want.runtime_id.is_empty() || self.runtime_id_of(&el) == want.runtime_id;
+                if rt_ok {
+                    *total += 1;
+                    if out.len() < 8 {
+                        let rect = unsafe { el.CurrentBoundingRectangle() }
+                            .map(rect_from)
+                            .unwrap_or(Rect {
+                                x: 0,
+                                y: 0,
+                                width: 0,
+                                height: 0,
+                            });
+                        out.push((el.clone(), rect));
+                    }
                 }
             }
             self.collect(walker, &el, want, out, total, depth + 1);

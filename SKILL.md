@@ -67,7 +67,7 @@ $s.data.elements | Select-Object ref, role, name, actions, checked | Format-Tabl
 # 4. 动手（ref 必须来自本次输出）
 $ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object -First 1).ref
 $r = & $desk click $ref --window $win.id | ConvertFrom-Json
-$r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
+$r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么（额外 30–400 ms 树遍历）
 
 # 5. 需要新 ref 才再 snap；不需要就直接继续
 ```
@@ -131,7 +131,7 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
 
 ```powershell
 & $desk rclick '@s1:e7' --window w-1234   # 右键（上下文菜单）
-& $desk dclick '@s1:e12' --window w-1234  # 双击（会补 WM_LBUTTONDBLCLK）
+& $desk dclick '@s1:e12' --window w-1234  # 双击（有 CS_DBLCLKS 补 DBLCLK；没有的补第二次点击）
 & $desk scroll --window $win.id --delta -360
 & $desk drag "100,200" "400,200" --window $win.id   # 屏幕坐标
 ```
@@ -178,8 +178,8 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
  "marks_truncated":false,"marks":[{"n":1,"ref":"@s...:e7","role":"button","name":"保存","rect":{...}}]}
 ```
 
-屏幕坐标 = 像素坐标 + `origin`；`marks[n].ref` 可以直接拿去 `click`。最多画 60 个框，
-超出时 `marks_truncated:true`。
+屏幕坐标 = 像素坐标 + `origin`；`marks[n].ref` 可以直接拿去 `click`，`marks[n].rect` 是屏幕坐标。
+最多画 60 个框，超出时 `marks_truncated:true`。
 读不到 UIA 的程序（自绘界面、游戏、部分 Electron 页面）用 `shot` + `click --xy`。
 
 ## 批量执行

@@ -421,16 +421,17 @@ fn dispatch(cmd: &str, args: &Args) -> Result<(String, Value)> {
         }
         "set" => {
             let r = args.positionals();
-            let ref_id = ref_arg(args).ok_or_else(|| need("<@ref> <value>"))?;
-            let ref_is_positional = r.first().map(|s| s.starts_with('@')).unwrap_or(false);
-            let value = if ref_is_positional {
-                r.get(1)
+            // --ref 显式给出时，位置参数全都属于"值"（值本身可以以 @ 开头）。
+            let (ref_id, value) = if let Some(rf) = args.opt("--ref") {
+                let v = r.first().cloned().ok_or_else(|| need("<@ref> <value>"))?;
+                (rf, v)
             } else {
-                r.first()
-            }
-            .ok_or_else(|| need("<@ref> <value>"))?;
+                let rf = r.first().ok_or_else(|| need("<@ref> <value>"))?;
+                let v = r.get(1).ok_or_else(|| need("<@ref> <value>"))?.clone();
+                (rf.clone(), v)
+            };
             let uia = Uia::new()?;
-            Ok((cmd.into(), act::set_value(&uia, &ref_id, value)?))
+            Ok((cmd.into(), act::set_value(&uia, &ref_id, &value)?))
         }
         "key" => key_cmd(args),
         "type" => type_cmd(args),
@@ -517,6 +518,19 @@ fn typing_hwnd(hwnd: HWND) -> HWND {
 
 fn need(what: &str) -> DeskError {
     DeskError::new("BAD_ARGS", format!("缺少参数：{what}")).with_suggestion("desk help")
+}
+
+/// 窗口级命令的 id：位置参数 w-xxxx、--window，或 --ref 所指快照的窗口。
+fn window_id_arg(args: &Args) -> Option<String> {
+    if let Some(id) = args.positionals().into_iter().find(|s| s.starts_with("w-")) {
+        return Some(id);
+    }
+    if let Some(id) = args.opt("--window") {
+        return Some(id);
+    }
+    let r = args.opt("--ref")?;
+    let sid = r.trim_start_matches('@').split(':').next()?;
+    store::load(sid).ok().map(|s| s.window_id)
 }
 
 /// 元素引用：位置参数里的 @ref 优先，其次 --ref（两种写法命令都认）。
@@ -1098,10 +1112,10 @@ fn elevate_cmd(args: &Args) -> Result<Value> {
 }
 
 fn guard_cmd(args: &Args) -> Result<Value> {
-    let secs = args.int("--seconds")?.unwrap_or(30).clamp(1, 3600) as u64;
+    let secs = args.int("--seconds")?.unwrap_or(30).clamp(1, 540) as u64;
     let mut exe = args.opt("--exe");
     if exe.is_none()
-        && let Some(w) = args.opt("--window")
+        && let Some(w) = window_id_arg(args)
     {
         let hwnd = win::parse_window_id(&w)?;
         exe = Some(
@@ -1497,7 +1511,11 @@ fn shot_cmd(args: &Args) -> Result<Value> {
                     continue;
                 }
                 let (x, y) = (x as i32 - ox, y as i32 - oy);
-                if x < 0 || y < 0 {
+                if x < 0
+                    || y < 0
+                    || x + w as i32 > img.width as i32
+                    || y + h as i32 > img.height as i32
+                {
                     continue;
                 }
                 marks_total += 1;
@@ -1539,9 +1557,8 @@ fn shot_cmd(args: &Args) -> Result<Value> {
 }
 
 fn window_action(cmd: &str, args: &Args) -> Result<Value> {
-    let r = args.positionals();
-    let id = r.first().ok_or_else(|| need("<窗口 id>"))?;
-    let hwnd = win::parse_window_id(id)?;
+    let id = window_id_arg(args).ok_or_else(|| need("<窗口 id>"))?;
+    let hwnd = win::parse_window_id(&id)?;
     act::ensure_reachable(hwnd)?;
     win::touch(hwnd);
     match cmd {
@@ -1560,9 +1577,25 @@ fn window_action(cmd: &str, args: &Args) -> Result<Value> {
             Ok(value)
         }
         "restore" => {
-            // SW_SHOWNOACTIVATE 会取消最小化但不激活；SW_SHOWMINNOACTIVE 是 minimize 用的。
-            unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // SetWindowPlacement 不会激活窗口，又能同时取消最小化和最大化。
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowPlacement, SW_SHOWNORMAL, SetWindowPlacement, WINDOWPLACEMENT,
+            };
+            let mut wp = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            let got = unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_ok();
+            if got {
+                wp.showCmd = SW_SHOWNORMAL.0 as u32;
+                wp.flags = Default::default();
+                unsafe {
+                    let _ = SetWindowPlacement(hwnd, &wp);
+                }
+            } else {
+                unsafe {
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
             }
             let minimized = unsafe { IsIconic(hwnd).as_bool() };
             let maximized = unsafe { IsZoomed(hwnd).as_bool() };
@@ -1594,10 +1627,11 @@ fn window_action(cmd: &str, args: &Args) -> Result<Value> {
 
 fn window_geometry(cmd: &str, args: &Args) -> Result<Value> {
     let r = args.positionals();
-    let id = r.first().ok_or_else(|| need("<窗口 id> <x> <y>|<w> <h>"))?;
-    let a = parse_i32_arg(r.get(1), "坐标/宽度")?;
-    let b = parse_i32_arg(r.get(2), "坐标/高度")?;
-    let hwnd = win::parse_window_id(id)?;
+    let id = window_id_arg(args).ok_or_else(|| need("<窗口 id> <x> <y>|<w> <h>"))?;
+    let nums: Vec<&String> = r.iter().filter(|s| s.parse::<i32>().is_ok()).collect();
+    let a = parse_i32_arg(nums.first().copied(), "坐标/宽度")?;
+    let b = parse_i32_arg(nums.get(1).copied(), "坐标/高度")?;
+    let hwnd = win::parse_window_id(&id)?;
     act::ensure_reachable(hwnd)?;
     let info = unsafe { win::describe(hwnd, true) }
         .ok_or_else(|| DeskError::new("WINDOW_GONE", "目标窗口已消失"))?;

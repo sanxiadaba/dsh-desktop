@@ -20,6 +20,7 @@ pub struct Observation {
     /// 基线快照的遍历上限：after 必须用同一组上限，否则会把"没截到的部分"误报成新出现。
     limit: usize,
     depth: usize,
+    raw_view: bool,
 }
 
 /// 在动作之前调用：记下目标窗口、它当前的树、以及顶层窗口集合。
@@ -29,6 +30,7 @@ pub fn capture(args: &Args) -> Observation {
     let mut title = String::new();
     let mut limit = 300usize;
     let mut depth = 16usize;
+    let mut raw_view = false;
 
     // 元素动作：ref 在位置参数或 --ref 里。
     let ref_id = args
@@ -47,6 +49,7 @@ pub fn capture(args: &Args) -> Observation {
         baseline = snap.nodes;
         limit = snap.limit;
         depth = snap.depth;
+        raw_view = snap.raw_view;
     }
 
     // 窗口级动作：--window 或位置参数里的 w-xxxx。
@@ -64,6 +67,7 @@ pub fn capture(args: &Args) -> Observation {
                 baseline = snap.nodes;
                 limit = snap.limit;
                 depth = snap.depth;
+                raw_view = snap.raw_view;
             } else {
                 title = unsafe { win::describe(hwnd, true) }
                     .map(|i| i.title)
@@ -80,6 +84,7 @@ pub fn capture(args: &Args) -> Observation {
         windows: win::enum_windows(true).into_iter().map(|w| w.id).collect(),
         limit,
         depth,
+        raw_view,
     }
 }
 
@@ -193,8 +198,8 @@ pub fn after(obs: &Observation) -> Value {
         out["changed"] = json!(true);
     }
     if info.minimized {
-        out["ms"] = json!(started.elapsed().as_millis() as u64);
-        return out;
+        // 最小化窗口 UIA 仍可读：继续做元素级 diff，否则 toggle 之类会误报 changed=false。
+        out["window"]["minimized"] = json!(true);
     }
     // 没有基线就不要做元素级 diff：否则每个元素都会被算成"新出现"。
     if obs.baseline.is_empty() {
@@ -216,7 +221,7 @@ pub fn after(obs: &Observation) -> Value {
     let opts = WalkOptions {
         max_depth: obs.depth,
         limit: obs.limit,
-        raw_view: false,
+        raw_view: obs.raw_view,
     };
     let nodes = match uia.snapshot(hwnd, "sobs", &opts) {
         Ok((nodes, _)) => nodes,

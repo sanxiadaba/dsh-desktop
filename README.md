@@ -25,8 +25,9 @@ Qt 程序、Win32 自绘界面、把控件拆成子 HWND 的上位机，恰好�
 
 **v0.2 补上的三件事**（对比后最明显的差距）：
 
-- **动作闭环**：每条动作返回 `after`——界面因此变了什么（新出现/消失/值变化/新窗口），
-  agent 不用再盲目 `snap` 一次。
+- **动作闭环**：每个会改界面的动作返回 `after`——界面因此变了什么（新出现/消失/值变化/选中变化/新窗口），
+  agent 不用再盲目 `snap` 一次。代价是动作后多一次目标窗口树遍历（约 30–400 ms），
+  `--no-observe` 或 `DESK_OBSERVE=0` 可关闭。
 - **预检**：`doctor` 在动手前回答"为什么动不了"（最小化、UIPI、挂起、UIA 读不到）。
 - **视觉桥**：`shot --marks` 把可动元素编号画在截图上，像素和 `@ref` 能对上。
 
@@ -45,8 +46,9 @@ Qt 程序、Win32 自绘界面、把控件拆成子 HWND 的上位机，恰好�
 - **快照是扁平的**（带 `depth`），输出是紧凑 JSON（`--pretty` 可读）；默认 `limit 300`，
   被 `--limit` 或 `--depth` 截断时 `truncated:true`。快照只保留最近 30 份；
   `wait` 和动作后的观测不落盘，也不会挤掉你的 ref。
-- **元素身份 = 路径 +（角色、名字、automation_id、矩形）**；路径失效时按身份+旧矩形重新定位，
-  只有"旧位置附近恰好一个"才继续，否则 `STALE_REF` / `AMBIGUOUS_TARGET`，不会静默点邻居。
+- **元素身份 = 路径 +（角色、名字、automation_id）**；同一窗口里出现重复身份时，快照会额外
+  读取 UIA RuntimeId，被删掉的同名兄弟不会被静默顶替。路径失效时按身份唯一性 + 旧位置重新定位，
+  只有"旧位置附近恰好一个"才继续，否则 `STALE_REF` / `AMBIGUOUS_TARGET`。
 - **属性走 UIA CacheRequest**；有状态属性（value/checked/selected）按元素现读，
   所以"一个元素一次跨进程调用"只对静态属性成立。
 - **每个动作后的回读**：`select`/`toggle` 读状态、列表项 `invoke` 读选中态、`set` 返回 `value_matches`；
@@ -99,7 +101,8 @@ $desk = "$env:USERPROFILE\.dsh\skills\desktop\desk.exe"
 & $desk selftest                       # 自测，不需要任何外部程序
 ```
 
-每个命令输出一个 JSON（`help` 例外，是纯文本）：
+每个命令输出一个 JSON（`help` 例外，是纯文本）。退出码：`0` 成功、`1` 业务失败、
+`5` 看门狗超时（`WATCHDOG_TIMEOUT`）。
 
 ```json
 {"version":"0.2.0","ok":true,"command":"snap","elapsed_ms":31,

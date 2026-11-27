@@ -493,8 +493,8 @@ pub fn info(uia: &Uia, ref_id: &str) -> Result<Value> {
         "actions": r.node.actions,
         "value": value,
         "password": r.node.password,
-        "checked": r.node.checked,
-        "selected": r.node.selected,
+        "checked": uia.is_toggled(&r.element),
+        "selected": uia.is_selected(&r.element),
         "focused": unsafe { r.element.CurrentHasKeyboardFocus() }.map(|b| b.as_bool()).unwrap_or(false),
         "keyboard_focusable": unsafe { r.element.CurrentIsKeyboardFocusable() }.map(|b| b.as_bool()).unwrap_or(false),
         "native_hwnd": native,
@@ -548,9 +548,14 @@ pub fn set_value(uia: &Uia, ref_id: &str, value: &str) -> Result<Value> {
     } else {
         uia.value_of(&r.element)
     };
-    let matches = after.as_deref() == Some(value);
+    let matches = if r.node.password {
+        Value::Null
+    } else {
+        json!(after.as_deref() == Some(value))
+    };
     let mut out = json!({"ref": ref_id, "mode": "semantic:set", "value": after,
-        "value_matches": matches, "password": r.node.password,
+        "value_matches": matches, "verified": if r.node.password { json!(false) } else { json!(true) },
+        "password": r.node.password,
         "element": {"role": r.node.role, "name": r.node.name}});
     if let Some(prev) = &r.node.value
         && r.node.password
@@ -650,6 +655,8 @@ pub fn wheel(hwnd: HWND, x: i32, y: i32, delta: i32) -> Result<Value> {
 
 pub fn drag(hwnd: HWND, from: (i32, i32), to: (i32, i32)) -> Result<Value> {
     ensure_reachable(hwnd)?;
+    ensure_inside(hwnd, from.0, from.1)?;
+    ensure_inside(hwnd, to.0, to.1)?;
     let (res, stolen) = guarded(hwnd, || input::drag_screen(hwnd, from, to, 24));
     res?;
     let mut out = json!({"mode": "bg:drag", "from": {"x": from.0, "y": from.1}, "to": {"x": to.0, "y": to.1}});
