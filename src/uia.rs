@@ -272,30 +272,14 @@ impl Uia {
             &mut elements,
             &mut stats,
         );
-        // 只给"同指纹重复"的元素取 RuntimeId：它们才需要区分同名兄弟，
-        // 唯一元素用 role+id/name 就够，避免为每个元素多打一次跨进程调用。
-        let mut groups: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
-        for (i, n) in out.iter().enumerate() {
-            // 只关心"能动手的元素"：文本/面板重复与否不影响 ref 解析。
-            if n.actions.is_empty() {
+        // 给所有"能动手"的元素取 RuntimeId：元素被销毁后同名新建，RuntimeId 会变，
+        // 旧 ref 必须 fail-closed，不能静默点到新元素上。非动作元素不值得多打这次调用。
+        for (i, node) in out.iter_mut().enumerate() {
+            if node.actions.is_empty() {
                 continue;
             }
-            let id = if n.automation_id.is_empty() {
-                &n.name
-            } else {
-                &n.automation_id
-            };
-            groups
-                .entry(format!("{}|{}|{}", n.role, id, n.class_name))
-                .or_default()
-                .push(i);
-        }
-        for idxs in groups.values().filter(|v| v.len() > 1) {
-            for &i in idxs {
-                if let Some(el) = elements.get(i) {
-                    out[i].runtime_id = self.runtime_id_of(el);
-                }
+            if let Some(el) = elements.get(i) {
+                node.runtime_id = self.runtime_id_of(el);
             }
         }
         Ok((out, stats))
@@ -562,8 +546,8 @@ impl Uia {
         }
     }
 
-    /// 身份判定：有 RuntimeId 就只认 RuntimeId（窗口移动/缩放/列表插入都不影响）；
-    /// 唯一元素只比身份，不再看矩形。
+    /// 身份判定：有 RuntimeId 就只认 RuntimeId（窗口移动/缩放/列表插入都不影响，
+    /// 元素销毁后同名重建会被识破）；老快照没有 RuntimeId 时，动作元素退回位置校验。
     fn identity_strong(&self, el: &IUIAutomationElement, node: &Node) -> bool {
         if !self.identity_ok(el, node) {
             return false;
@@ -571,7 +555,13 @@ impl Uia {
         if !node.runtime_id.is_empty() {
             return self.runtime_id_of(el) == node.runtime_id;
         }
-        true
+        if node.actions.is_empty() || node.rect.is_empty() {
+            return true;
+        }
+        let Some(cur) = self.rect_of(el) else {
+            return false;
+        };
+        overlap_ratio(&cur, &node.rect) > 0.5
     }
 
     fn identity_ok(&self, el: &IUIAutomationElement, node: &Node) -> bool {
@@ -629,8 +619,9 @@ impl Uia {
         let mut hits: Vec<(IUIAutomationElement, Rect)> = Vec::new();
         let mut total = 0usize;
         self.collect(&walker, &root, node, &mut hits, &mut total, 0);
-        // 身份在这个窗口里唯一：位置变了也认它（resize/滚动/插入兄弟都不会误杀）。
-        if total == 1 && hits.len() == 1 {
+        // 身份在这个窗口里唯一且"强"（有 RuntimeId，或本来就不是动作元素）：位置变了也认。
+        let strong = !node.runtime_id.is_empty() || node.actions.is_empty();
+        if total == 1 && hits.len() == 1 && strong {
             return Ok(hits.remove(0).0);
         }
         let near: Vec<_> = hits

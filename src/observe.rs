@@ -32,12 +32,10 @@ pub fn capture(args: &Args) -> Observation {
     let mut depth = 16usize;
     let mut raw_view = false;
 
-    // 元素动作：ref 在位置参数或 --ref 里。
+    // 元素动作：--ref 优先（set 的值可能是以 @ 开头的字面量），其次位置参数里的 @ref。
     let ref_id = args
-        .positionals()
-        .into_iter()
-        .find(|s| s.starts_with('@'))
-        .or_else(|| args.opt("--ref"));
+        .opt("--ref")
+        .or_else(|| args.positionals().into_iter().find(|s| s.starts_with('@')));
     if let Some(ref_id) = ref_id
         && let Some(body) = ref_id.strip_prefix('@')
         && let Some((sid, _)) = body.split_once(':')

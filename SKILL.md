@@ -67,7 +67,7 @@ $s.data.elements | Select-Object ref, role, name, actions, checked | Format-Tabl
 # 4. 动手（ref 必须来自本次输出）
 $ref = ($s.data.elements | Where-Object { $_.name -eq '保存' } | Select-Object -First 1).ref
 $r = & $desk click $ref --window $win.id | ConvertFrom-Json
-$r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么（额外 30–400 ms 树遍历）
+$r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么（额外 30–600 ms 树遍历）
 
 # 5. 需要新 ref 才再 snap；不需要就直接继续
 ```
@@ -246,11 +246,12 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么（额�
 
 `retry` 字段：`safe` 表示动作肯定没落地，可以重试；`unsafe` 表示可能已经生效，
 **先重新读状态再决定**，不要盲目重试（会点两次）。
+退出码：`0` 成功、`1` 业务失败、`5` 看门狗超时（`WATCHDOG_TIMEOUT`）。
 
 ## 坑
 
 - **动作后 `after.changed=false`**：说明界面没变，不要继续下一步；先 `snap` 看当前状态。
-- **窗口里有两个同名按钮**：`ref` 用路径+矩形区分，正常不会拒绝。真遇到
+- **窗口里有两个同名按钮**：重复身份的元素在快照里带 UIA RuntimeId，正常不会拒绝。真遇到
   `AMBIGUOUS_TARGET` 说明它们连位置都一样，那就用 `--mode bg` 按某个具体 ref 的矩形点。
 - **经典 Win32 菜单条**：在非客户区，坐标点不到；`click` 对只有 `expand` 的菜单项会自动走语义展开。
 - **列表滚出视口**：UIA 会给出窗口外的坐标（比如 x=6000），后台点击会报 `POINT_OUTSIDE`。

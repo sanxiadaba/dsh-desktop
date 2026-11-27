@@ -818,6 +818,20 @@ fn click_cmd(args: &Args) -> Result<(String, Value)> {
         ));
     }
     let ref_id = ref_arg(args).ok_or_else(|| need("<@ref> 或 --xy X,Y"))?;
+    // ref 和 --window 同时给出时必须指向同一个窗口，否则说明调用方拿错了引用。
+    if let Some(w) = args.opt("--window") {
+        let (sid, _) = ref_id
+            .trim_start_matches('@')
+            .split_once(':')
+            .ok_or_else(|| DeskError::new("BAD_REF", "ref 格式不对"))?;
+        let snap = store::load(sid)?;
+        if !snap.window_id.eq_ignore_ascii_case(&w) {
+            return Err(DeskError::new(
+                "BAD_ARGS",
+                format!("ref 属于窗口 {}，但 --window 给的是 {w}", snap.window_id),
+            ));
+        }
+    }
     let mode = match args.opt("--mode") {
         Some(m) => Some(act::parse_mode(&m)?),
         None => None,
@@ -1114,6 +1128,13 @@ fn elevate_cmd(args: &Args) -> Result<Value> {
 fn guard_cmd(args: &Args) -> Result<Value> {
     let secs = args.int("--seconds")?.unwrap_or(30).clamp(1, 540) as u64;
     let mut exe = args.opt("--exe");
+    if args.opt("--ref").is_some() && window_id_arg(args).is_none() {
+        return Err(DeskError::new(
+            "BAD_ARGS",
+            "--ref 指向的快照不存在/已失效，无法确定 guard 的目标窗口",
+        )
+        .with_suggestion("重新 `desk snap`，或改用 --window/--exe"));
+    }
     if exe.is_none()
         && let Some(w) = window_id_arg(args)
     {
@@ -1577,25 +1598,9 @@ fn window_action(cmd: &str, args: &Args) -> Result<Value> {
             Ok(value)
         }
         "restore" => {
-            // SetWindowPlacement 不会激活窗口，又能同时取消最小化和最大化。
-            use windows::Win32::UI::WindowsAndMessaging::{
-                GetWindowPlacement, SW_SHOWNORMAL, SetWindowPlacement, WINDOWPLACEMENT,
-            };
-            let mut wp = WINDOWPLACEMENT {
-                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
-                ..Default::default()
-            };
-            let got = unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_ok();
-            if got {
-                wp.showCmd = SW_SHOWNORMAL.0 as u32;
-                wp.flags = Default::default();
-                unsafe {
-                    let _ = SetWindowPlacement(hwnd, &wp);
-                }
-            } else {
-                unsafe {
-                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                }
+            // SW_SHOWNOACTIVATE 同时取消最小化/最大化，且不激活窗口（SetWindowPlacement 会抢前台）。
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             let minimized = unsafe { IsIconic(hwnd).as_bool() };
             let maximized = unsafe { IsZoomed(hwnd).as_bool() };
@@ -1628,9 +1633,25 @@ fn window_action(cmd: &str, args: &Args) -> Result<Value> {
 fn window_geometry(cmd: &str, args: &Args) -> Result<Value> {
     let r = args.positionals();
     let id = window_id_arg(args).ok_or_else(|| need("<窗口 id> <x> <y>|<w> <h>"))?;
-    let nums: Vec<&String> = r.iter().filter(|s| s.parse::<i32>().is_ok()).collect();
-    let a = parse_i32_arg(nums.first().copied(), "坐标/宽度")?;
-    let b = parse_i32_arg(nums.get(1).copied(), "坐标/高度")?;
+    let mut nums: Vec<i32> = Vec::new();
+    for s in &r {
+        if s == &id {
+            continue;
+        }
+        match s.parse::<i32>() {
+            Ok(v) => nums.push(v),
+            Err(_) => {
+                return Err(DeskError::new(
+                    "BAD_ARGS",
+                    format!("坐标/尺寸必须是整数，收到：{s}"),
+                ));
+            }
+        }
+    }
+    if nums.len() != 2 {
+        return Err(need("<窗口 id> <x> <y>|<w> <h>"));
+    }
+    let (a, b) = (nums[0], nums[1]);
     let hwnd = win::parse_window_id(&id)?;
     act::ensure_reachable(hwnd)?;
     let info = unsafe { win::describe(hwnd, true) }
@@ -1655,12 +1676,6 @@ fn window_geometry(cmd: &str, args: &Args) -> Result<Value> {
     unsafe { SetWindowPos(hwnd, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) }
         .map_err(|e| DeskError::new("WINDOW_MOVE_FAILED", format!("移动/缩放窗口失败：{e}")))?;
     Ok(json!({"id": id, "rect": {"x": x, "y": y, "w": w, "h": h}}))
-}
-
-fn parse_i32_arg(v: Option<&String>, what: &str) -> Result<i32> {
-    let s = v.ok_or_else(|| need("<x> <y> 或 <w> <h>"))?;
-    s.parse::<i32>()
-        .map_err(|_| DeskError::new("BAD_ARGS", format!("{what}不是整数：{s}")))
 }
 
 fn launch_cmd(args: &Args) -> Result<Value> {

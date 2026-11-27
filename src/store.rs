@@ -188,13 +188,16 @@ pub fn latest_for_window(window_id: &str) -> Option<SnapshotFile> {
         if !is_valid_sid(sid) {
             continue;
         }
+        // 和 load 一样设上限：先看 metadata，别把 40MB 快照读进内存再丢。
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.len() > MAX_SNAPSHOT_BYTES {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(entry.path()) else {
             continue;
         };
-        // 和 load 一样设上限：别让一个超大快照文件把每次动作前都拖慢。
-        if text.len() as u64 > MAX_SNAPSHOT_BYTES {
-            continue;
-        }
         let Ok(snap) = serde_json::from_str::<SnapshotFile>(&text) else {
             continue;
         };
