@@ -50,11 +50,11 @@ Qt 程序、Win32 自绘界面、把控件拆成子 HWND 的上位机，恰好�
 - **属性走 UIA CacheRequest**；有状态属性（value/checked/selected）按元素现读，
   所以"一个元素一次跨进程调用"只对静态属性成立。
 - **每个动作后的回读**：`select`/`toggle` 读状态、列表项 `invoke` 读选中态、`set` 返回 `value_matches`；
-  程序收了没反应就自动退回后台点击，两次都不生效则返回 `ACTION_FAILED`（`retry=unsafe`），
-  不会出现"返回 ok 但界面没动"。
-- **动作后的 `after` 观测**：`changed`、`appeared`、`disappeared`、`value_changed`、`moved`、
-  `new_windows`（含菜单弹窗这类无标题窗口）、`window` 状态。默认开启，`--no-observe` 或
-  `DESK_OBSERVE=0` 关闭。
+  程序收了没反应就自动退回后台点击，两次都不生效则返回 `ACTION_FAILED`（`retry=unsafe`）。
+  对没有可回读状态的普通按钮，只保证"消息投递成功"。
+- **动作后的 `after` 观测**：`changed`、`appeared`、`disappeared`、`value_changed`、`state_changed`
+  （checked/selected/focused）、`moved`、`new_windows`（含菜单弹窗这类无标题窗口）、`window` 状态。
+  默认开启，`--no-observe` 或 `DESK_OBSERVE=0` 关闭。
 - **密码框不采集**：`UIA_IsPassword` 为真时 value 只输出 `***`，不落盘、不参与 `wait --text`。
 - **后台点击会做客户区边界检查**：元素滚出视口时直接报 `POINT_OUTSIDE`，不会静默点空。
 - **消息投给坐标下最深的子窗口**：经典 Win32 程序把页签/工具条做成子 HWND，投给顶层窗口等于没点。
@@ -63,8 +63,9 @@ Qt 程序、Win32 自绘界面、把控件拆成子 HWND 的上位机，恰好�
   目标线程键盘状态，通常不触发，返回 `effective:"unverified"`。
 - **文本输入**逐字投 `WM_CHAR`，ASCII 和中文都走这条路（绕过输入法）；
   `--method paste` 只在目标不认 `WM_CHAR` 时用，不再回退 Ctrl+V。
-- **截图是客户区 1:1 像素**，返回 `origin`（图像 (0,0) 对应的屏幕坐标）；
-  最小化窗口直接 `SHOT_EMPTY`，整幅同色会带 `blank:true`。
+- **截图是客户区 1:1 像素**，返回 `origin`（图像 (0,0) 对应的屏幕坐标，
+  屏幕坐标 = `origin` + 像素坐标）；最小化窗口直接 `SHOT_EMPTY`，整幅同色会带 `blank:true`。
+  `shot --marks` 最多标 60 个框，超出时 `marks_truncated:true`。
 
 ## 安装
 
@@ -112,7 +113,8 @@ $desk = "$env:USERPROFILE\.dsh\skills\desktop\desk.exe"
 ```json
 {"after":{"changed":true,"appeared":[...],"disappeared":[],
           "value_changed":[{"role":"edit","name":"文本编辑器","from":"","to":"abc"}],
-          "new_windows":[],"window":{"alive":true,"title":"*无标题 - 记事本"}}}
+          "state_changed":[],"new_windows":[],
+          "window":{"alive":true,"title":"*无标题 - 记事本"}}}
 ```
 
 ## 运行前提：管理员

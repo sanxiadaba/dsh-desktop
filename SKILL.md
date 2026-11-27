@@ -44,7 +44,8 @@ if (-not (Test-Path $desk)) { throw "desk.exe 不存在，先运行 $env:USERPRO
 
 1. **动作前必须先看**：`snap` 一次，拿到 `@ref` 再动手。不要凭记忆复用一个旧 ref。
 2. **动作后先读返回**：`ok:true` 只代表消息投递成功；`data.after` 告诉你界面到底变没变
-   （`changed` / `appeared` / `value_changed` / `new_windows`）。`after.changed=false` 时不要假设动作生效。
+   （`changed` / `appeared` / `disappeared` / `value_changed` / `state_changed` / `new_windows`）。
+   `after.changed=false` 时不要假设动作生效。
 3. **不要抢用户的前台**：这个工具没有物理输入，也没有 `focus` 命令。默认路径本来就是后台的。
 
 ## 主循环
@@ -96,6 +97,7 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
 动作返回里的 `mode` 告诉你实际走了哪条路：`semantic:*` 是 UIA 动作，`bg:*` 是后台注入。
 `select`/`toggle` 和列表项的 `click` 会回读状态，程序收了却没反应时自动退回后台点击
 （`mode=bg:*-fallback`）；两次都不生效会返回 `ACTION_FAILED`，`retry=unsafe`。
+没有可回读状态的普通按钮只保证消息投递，`after` 会告诉你界面有没有变。
 
 ## 动作
 
@@ -118,7 +120,7 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
 & $desk key  "enter"  --window $win.id               # 单键可靠
 & $desk key  "ctrl+s" --window $win.id               # 只保证投递：effective=unverified，常不触发
 & $desk type "hello 中文" --window $win.id            # 逐字 WM_CHAR，ASCII 和中文都行
-& $desk type "中文" '@s1:e4' --method value           # 直接写值，最稳
+& $desk type "中文" --ref '@s1:e4' --method value           # 直接写值，最稳
 & $desk type "中文" --window $win.id --method paste   # 只在目标不认 WM_CHAR 时用（剪贴板会恢复）
 ```
 
@@ -172,11 +174,12 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
 `shot --marks` 会先 snap，再把可动元素画成编号框，并返回：
 
 ```json
-{"path":"...","origin":{"x":0,"y":0},"snapshot_id":"s...",
- "marks":[{"n":1,"ref":"@s...:e7","role":"button","name":"保存","rect":{...}}]}
+{"path":"...","origin":{"x":0,"y":0},"snapshot_id":"s...","marks_total":12,
+ "marks_truncated":false,"marks":[{"n":1,"ref":"@s...:e7","role":"button","name":"保存","rect":{...}}]}
 ```
 
-像素坐标减 `origin` 就是屏幕坐标；`marks[n].ref` 可以直接拿去 `click`。
+屏幕坐标 = 像素坐标 + `origin`；`marks[n].ref` 可以直接拿去 `click`。最多画 60 个框，
+超出时 `marks_truncated:true`。
 读不到 UIA 的程序（自绘界面、游戏、部分 Electron 页面）用 `shot` + `click --xy`。
 
 ## 批量执行
@@ -229,7 +232,7 @@ $r.data.after | ConvertTo-Json -Depth 4     # 看它到底改变了什么
 | `STORE_FAILED` | 快照目录/文件读写失败 | 检查 `~/.dsh/desk` 权限与磁盘 |
 | `UIA_INIT` / `UIA_FAILED` | UIA 初始化/读取失败 | 确认是可交互桌面；`doctor` 看详情 |
 | `UIA_UNREADABLE` | `doctor` 读不到 UIA 树 | 用 `shot --marks` 或 `click --xy` |
-| `SHOT_EMPTY` | 最小化/空客户区/全同色 | 先 `restore`；或确认目标真的渲染了 |
+| `SHOT_EMPTY` | 最小化/空客户区 | 先 `restore`；整幅同色只报 `blank:true`，不是错误 |
 | `SHOT_FAILED` | 截图/写 PNG 失败 | 看路径、磁盘、窗口尺寸 |
 | `CLIPBOARD_FAILED` | 剪贴板被占用 | 稍后重试 |
 | `CLIPBOARD_TOO_LARGE` | 剪贴板文本没有正常结束 | 可能是异常 owner，先 `clipboard set` 覆盖 |

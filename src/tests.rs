@@ -242,6 +242,15 @@ fn every_command_is_documented_in_the_skill() {
 }
 
 #[test]
+fn ref_can_be_passed_as_option() {
+    // --ref 与位置参数等价：info 应该走到"快照不存在"，而不是"缺少参数"。
+    let err = crate::dispatch("info", &Args::new(&argv(&["--ref", "@snope:e1"]))).unwrap_err();
+    assert_eq!(err.code, "SNAPSHOT_NOT_FOUND");
+    let err = crate::dispatch("info", &Args::new(&argv(&[]))).unwrap_err();
+    assert_eq!(err.code, "BAD_ARGS");
+}
+
+#[test]
 fn readme_documents_commands_and_version() {
     let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
         .expect("读不到 README.md");

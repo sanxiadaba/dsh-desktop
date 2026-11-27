@@ -58,7 +58,18 @@ pub fn resolve(uia: &Uia, ref_id: &str) -> Result<Resolved> {
     ensure_reachable(hwnd)?;
 
     let mut node = node;
-    // 先按快照路径取：命中的元素身份必须对得上，否则说明界面动过了。
+    // 窗口可能被移动过：把快照里的屏幕坐标平移到当前窗口位置，再按矩形核对身份。
+    if let Some(info) = unsafe { win::describe(hwnd, true) }
+        && !snap.window_rect.is_empty()
+    {
+        let dx = info.rect.x - snap.window_rect.x;
+        let dy = info.rect.y - snap.window_rect.y;
+        if dx != 0 || dy != 0 {
+            node.rect.x = node.rect.x.saturating_add(dx);
+            node.rect.y = node.rect.y.saturating_add(dy);
+        }
+    }
+    // 先按快照路径取：命中的元素身份和矩形都要对得上，否则说明界面动过了。
     if let Some(el) = uia.element_at_path_cached(hwnd, &node, snap.raw_view) {
         // 用实时矩形覆盖快照里的旧矩形：窗口被移动/缩放后坐标才是准的。
         if let Some(fresh) = uia.rect_of(&el) {
@@ -663,6 +674,9 @@ pub fn snap(uia: &Uia, hwnd: HWND, opts: &WalkOptions, persist: bool) -> Result<
         title: info.title.clone(),
         pid: info.pid,
         class: info.class.clone(),
+        window_rect: info.rect.clone(),
+        limit: opts.limit,
+        depth: opts.max_depth,
         created_ms: now_ms(),
         nodes,
         raw_view: opts.raw_view,

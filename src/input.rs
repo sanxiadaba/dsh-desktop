@@ -13,9 +13,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CS_DBLCLKS, GCL_STYLE, GetClassLongPtrW, PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+    SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const TIMEOUT_MS: u32 = 2000;
@@ -289,15 +289,21 @@ pub fn double_click_client(hwnd: HWND, cx: i32, cy: i32) -> Result<bool> {
     }
     let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
     std::thread::sleep(std::time::Duration::from_millis(40));
-    let dbl_ok = send(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lp);
-    let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
-    if dbl_ok {
+    // 窗口类没注册 CS_DBLCLKS 时，系统不会把两条按下当双击；DBLCLK 消息也会被
+    // DefWindowProc 直接吞掉。这时补第二次完整点击作为退路，并返回 emulated=true。
+    if has_dblclks(hwnd) {
+        let _ = send(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lp);
+        let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
         return Ok(false);
     }
-    // 没有 CS_DBLCLKS：再补一次完整点击，至少让"双击打开"类控件收到两次点击。
     let _ = send(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp);
     let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
     Ok(true)
+}
+
+fn has_dblclks(hwnd: HWND) -> bool {
+    let style = unsafe { GetClassLongPtrW(hwnd, GCL_STYLE) } as u32;
+    style & CS_DBLCLKS.0 != 0
 }
 
 /// 把剪贴板内容粘贴到目标窗口。

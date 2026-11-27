@@ -477,11 +477,23 @@ impl Uia {
             }
             cur = child;
         }
-        if self.identity_ok(&cur, node) {
+        if self.identity_ok(&cur, node) && self.rect_matches(&cur, node) {
             Some(cur)
         } else {
             None
         }
+    }
+
+    /// 快照里的矩形（已按窗口位移平移）和当前矩形是否落在同一块区域。
+    /// 同名同 id 的兄弟被删掉后，路径会指到邻居，这一步必须把它拦下来。
+    fn rect_matches(&self, el: &IUIAutomationElement, node: &Node) -> bool {
+        if node.rect.is_empty() {
+            return true;
+        }
+        let Some(cur) = self.rect_of(el) else {
+            return false;
+        };
+        overlap_ratio(&cur, &node.rect) > 0.5
     }
 
     fn identity_ok(&self, el: &IUIAutomationElement, node: &Node) -> bool {
@@ -542,10 +554,14 @@ impl Uia {
         if hits.len() == 1 {
             return Ok(hits.remove(0).0);
         }
-        if hits.is_empty() && total == 0 {
+        if hits.is_empty() {
             return Err(DeskError::new(
                 "STALE_REF",
-                format!("界面已变化，找不到 {} 这个元素了", node.label()),
+                format!(
+                    "界面已变化，找不到位置一致的 {}（窗口里有 {} 个同名元素）",
+                    node.label(),
+                    total
+                ),
             )
             .with_suggestion("重新 `desk snap` 再操作"));
         }

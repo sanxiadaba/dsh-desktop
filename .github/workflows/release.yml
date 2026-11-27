@@ -13,8 +13,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
       - name: build
         run: cargo build --release
+      - name: static CRT
+        shell: pwsh
+        run: |
+          $s = [System.IO.File]::ReadAllText("target\release\desk.exe")
+          if ($s.Contains("VCRUNTIME140.dll")) { throw "release exe still depends on VCRUNTIME140.dll" }
       - name: package
         shell: pwsh
         run: |

@@ -17,6 +17,9 @@ pub struct Observation {
     baseline: Vec<Node>,
     title: String,
     windows: Vec<String>,
+    /// 基线快照的遍历上限：after 必须用同一组上限，否则会把"没截到的部分"误报成新出现。
+    limit: usize,
+    depth: usize,
 }
 
 /// 在动作之前调用：记下目标窗口、它当前的树、以及顶层窗口集合。
@@ -24,6 +27,8 @@ pub fn capture(args: &Args) -> Observation {
     let mut target = None;
     let mut baseline = Vec::new();
     let mut title = String::new();
+    let mut limit = 300usize;
+    let mut depth = 16usize;
 
     // 元素动作：ref 在位置参数或 --ref 里。
     let ref_id = args
@@ -40,6 +45,8 @@ pub fn capture(args: &Args) -> Observation {
         target = Some(hwnd);
         title = snap.title.clone();
         baseline = snap.nodes;
+        limit = snap.limit;
+        depth = snap.depth;
     }
 
     // 窗口级动作：--window 或位置参数里的 w-xxxx。
@@ -55,6 +62,8 @@ pub fn capture(args: &Args) -> Observation {
             if let Some(snap) = store::latest_for_window(&id) {
                 title = snap.title.clone();
                 baseline = snap.nodes;
+                limit = snap.limit;
+                depth = snap.depth;
             } else {
                 title = unsafe { win::describe(hwnd, true) }
                     .map(|i| i.title)
@@ -69,6 +78,8 @@ pub fn capture(args: &Args) -> Observation {
         title,
         // 连不可见/工具窗口一起记，才能发现"菜单弹窗"这类无标题的新 HWND。
         windows: win::enum_windows(true).into_iter().map(|w| w.id).collect(),
+        limit,
+        depth,
     }
 }
 
@@ -92,7 +103,26 @@ fn brief(n: &Node) -> Value {
     if let Some(v) = &n.value {
         o["value"] = json!(v);
     }
+    if let Some(c) = n.checked {
+        o["checked"] = json!(c);
+    }
+    if let Some(s) = n.selected {
+        o["selected"] = json!(s);
+    }
+    if n.focused {
+        o["focused"] = json!(true);
+    }
     o
+}
+
+/// 两个节点是不是"同一个位置"（窗口内坐标，允许几像素抖动）。
+fn same_place(a: &Node, b: &Node) -> bool {
+    if a.rect.is_empty() || b.rect.is_empty() {
+        return false;
+    }
+    let dx = (a.rect.x + a.rect.width / 2) - (b.rect.x + b.rect.width / 2);
+    let dy = (a.rect.y + a.rect.height / 2) - (b.rect.y + b.rect.height / 2);
+    dx.abs() <= 8 && dy.abs() <= 8
 }
 
 fn group(nodes: &[Node]) -> HashMap<String, Vec<&Node>> {
@@ -111,6 +141,7 @@ pub fn after(obs: &Observation) -> Value {
         "appeared": [],
         "disappeared": [],
         "value_changed": [],
+        "state_changed": [],
         "moved": 0,
         "new_windows": [],
     });
@@ -183,8 +214,8 @@ pub fn after(obs: &Observation) -> Value {
         }
     };
     let opts = WalkOptions {
-        max_depth: 16,
-        limit: 300,
+        max_depth: obs.depth,
+        limit: obs.limit,
         raw_view: false,
     };
     let nodes = match uia.snapshot(hwnd, "sobs", &opts) {
@@ -201,20 +232,30 @@ pub fn after(obs: &Observation) -> Value {
     let mut appeared = Vec::new();
     let mut disappeared = Vec::new();
     let mut value_changed = Vec::new();
+    let mut state_changed = Vec::new();
     let mut moved = 0usize;
 
+    // 用"同一位置是否已有节点"来配对，避免同名兄弟被删后报错实例。
     for (key, now) in &after_map {
-        let old = before_map.get(key).map(|v| v.len()).unwrap_or(0);
-        if now.len() > old {
-            for n in now.iter().skip(old).take(10) {
+        let old = before_map.get(key).cloned().unwrap_or_default();
+        if now.len() > old.len() {
+            for n in now
+                .iter()
+                .filter(|n| !old.iter().any(|o| same_place(o, n)))
+                .take(10)
+            {
                 appeared.push(brief(n));
             }
         }
     }
     for (key, before) in &before_map {
-        let now = after_map.get(key).map(|v| v.len()).unwrap_or(0);
-        if before.len() > now {
-            for n in before.iter().skip(now).take(10) {
+        let now = after_map.get(key).cloned().unwrap_or_default();
+        if before.len() > now.len() {
+            for n in before
+                .iter()
+                .filter(|n| !now.iter().any(|o| same_place(o, n)))
+                .take(10)
+            {
                 disappeared.push(brief(n));
             }
         }
@@ -227,10 +268,18 @@ pub fn after(obs: &Observation) -> Value {
             continue;
         }
         for (b, a) in before.iter().zip(now.iter()) {
-            if b.value != a.value && b.value.is_some() && a.value.is_some() {
+            if b.value != a.value && (b.value.is_some() || a.value.is_some()) {
                 value_changed.push(json!({
                     "role": a.role, "name": a.name,
                     "from": b.value, "to": a.value,
+                }));
+            }
+            // 勾选/选中/焦点变化也是"界面变了"，不能只比 value。
+            if b.checked != a.checked || b.selected != a.selected || b.focused != a.focused {
+                state_changed.push(json!({
+                    "role": a.role, "name": a.name,
+                    "from": {"checked": b.checked, "selected": b.selected, "focused": b.focused},
+                    "to": {"checked": a.checked, "selected": a.selected, "focused": a.focused},
                 }));
             }
             if !b.rect.is_empty()
@@ -244,12 +293,19 @@ pub fn after(obs: &Observation) -> Value {
     appeared.truncate(10);
     disappeared.truncate(10);
     value_changed.truncate(5);
-    if !appeared.is_empty() || !disappeared.is_empty() || !value_changed.is_empty() || moved > 0 {
+    state_changed.truncate(5);
+    if !appeared.is_empty()
+        || !disappeared.is_empty()
+        || !value_changed.is_empty()
+        || !state_changed.is_empty()
+        || moved > 0
+    {
         out["changed"] = json!(true);
     }
     out["appeared"] = json!(appeared);
     out["disappeared"] = json!(disappeared);
     out["value_changed"] = json!(value_changed);
+    out["state_changed"] = json!(state_changed);
     out["moved"] = json!(moved);
     out["count_before"] = json!(obs.baseline.len());
     out["count_after"] = json!(nodes.len());

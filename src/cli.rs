@@ -225,7 +225,7 @@ fn allowed_for(cmd: &str) -> &'static [&'static str] {
             "--marks",
             "--no-observe",
         ],
-        "click" | "rclick" | "dclick" => &[
+        "click" => &[
             "--window",
             "--ref",
             "--mode",
@@ -233,6 +233,7 @@ fn allowed_for(cmd: &str) -> &'static [&'static str] {
             "--xy",
             "--no-observe",
         ],
+        "rclick" | "dclick" => &["--window", "--ref", "--xy", "--no-observe"],
         "select" | "toggle" | "expand" | "collapse" | "scrollitem" | "scrollinto" => {
             &["--window", "--ref", "--no-observe"]
         }

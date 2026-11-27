@@ -11,10 +11,18 @@
 
 use crate::error::{DeskError, Result};
 use crate::uia::Node;
+use crate::win::Rect;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const MAX_SNAPSHOT_BYTES: u64 = 32 * 1024 * 1024;
+
+fn default_limit() -> usize {
+    300
+}
+fn default_depth() -> usize {
+    16
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotFile {
@@ -26,6 +34,14 @@ pub struct SnapshotFile {
     pub pid: u32,
     #[serde(default)]
     pub class: String,
+    /// 生成快照时的窗口矩形：窗口移动后，ref 里的屏幕坐标要按这个位移平移。
+    #[serde(default)]
+    pub window_rect: Rect,
+    /// 生成这棵树时的遍历上限：after 观测必须用同一组上限，否则会误报 appeared。
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+    #[serde(default = "default_depth")]
+    pub depth: usize,
     pub created_ms: u64,
     pub nodes: Vec<Node>,
     /// 生成这棵树时用的是 RawView 还是 ControlView。解析 ref 必须用同一种。

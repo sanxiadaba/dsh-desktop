@@ -24,8 +24,8 @@ use uia::{Uia, WalkOptions};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, IsIconic, IsWindow, IsZoomed, PostMessageW, SW_MAXIMIZE,
-    SW_SHOWMINNOACTIVE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-    ShowWindow, WM_CLOSE,
+    SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
+    SetWindowPos, ShowWindow, WM_CLOSE,
 };
 
 /// 提权子进程的结果文件：看门狗超时也要把信封写进去，父进程才拿得到原因。
@@ -166,7 +166,12 @@ fn allowed_result_file(path: &std::path::Path) -> Result<std::path::PathBuf> {
             "--result-file 只允许提权子进程使用，且必须落在 desk 状态目录下",
         ));
     }
-    let _ = std::fs::remove_file(path);
+    if path.exists() {
+        return Err(DeskError::new(
+            "BAD_ARGS",
+            "--result-file 目标已存在；提权结果只允许新建，不覆盖",
+        ));
+    }
     Ok(path.to_path_buf())
 }
 
@@ -204,7 +209,7 @@ fn watchdog_budget(args: &Args) -> Duration {
             .map(|s| s.saturating_mul(1000))
     });
     if let Some(ms) = declared_ms {
-        return Duration::from_millis(ms.max(1000) as u64 + 30_000);
+        return Duration::from_millis(ms.clamp(1_000, 600_000) as u64 + 30_000);
     }
     let from_env = std::env::var("DESK_WATCHDOG_MS")
         .ok()
@@ -270,9 +275,18 @@ fn emit_envelope(envelope: &Value, file: Option<&std::path::Path>, pretty: bool)
     }
     match file {
         Some(p) => {
-            if let Err(e) = std::fs::write(p, &text) {
-                eprintln!("desk: 写结果文件失败：{e}");
-                return true;
+            // create_new：不允许覆盖/删除已存在的文件（提权结果通道只写自己那份）。
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(p)
+            {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(text.as_bytes()) {
+                        eprintln!("desk: 写结果文件失败：{e}");
+                    }
+                }
+                Err(e) => eprintln!("desk: 创建结果文件失败：{e}"),
             }
         }
         None => {
@@ -360,19 +374,17 @@ fn dispatch(cmd: &str, args: &Args) -> Result<(String, Value)> {
                 };
                 return Ok((cmd.into(), v));
             }
-            let r = args.positionals();
-            let ref_id = r.first().ok_or_else(|| need("<@ref> 或 --xy X,Y"))?;
+            let ref_id = ref_arg(args).ok_or_else(|| need("<@ref> 或 --xy X,Y"))?;
             let uia = Uia::new()?;
             let v = if cmd == "rclick" {
-                act::right_click(&uia, ref_id)?
+                act::right_click(&uia, &ref_id)?
             } else {
-                act::double_click(&uia, ref_id)?
+                act::double_click(&uia, &ref_id)?
             };
             Ok((cmd.into(), v))
         }
         "info" => {
-            let r = args.positionals();
-            let ref_id = r.first().ok_or_else(|| need("<@ref>"))?;
+            let ref_id = ref_arg(args).ok_or_else(|| need("<@ref>"))?;
             // --window 只能和 ref 指向同一个窗口；不一致说明调用方拿错了引用。
             if let Some(id) = args.opt("--window") {
                 let (sid, _) = ref_id
@@ -388,33 +400,37 @@ fn dispatch(cmd: &str, args: &Args) -> Result<(String, Value)> {
                 }
             }
             let uia = Uia::new()?;
-            Ok(("info".into(), act::info(&uia, ref_id)?))
+            Ok(("info".into(), act::info(&uia, &ref_id)?))
         }
         "scrollitem" | "scrollinto" => {
-            let r = args.positionals();
-            let ref_id = r.first().ok_or_else(|| need("<@ref>"))?;
+            let ref_id = ref_arg(args).ok_or_else(|| need("<@ref>"))?;
             let uia = Uia::new()?;
-            let v = act::scroll_into_view(&uia, ref_id)?;
+            let v = act::scroll_into_view(&uia, &ref_id)?;
             Ok((cmd.into(), v))
         }
         "select" | "toggle" | "expand" | "collapse" => {
-            let r = args.positionals();
-            let ref_id = r.first().ok_or_else(|| need("<@ref>"))?;
+            let ref_id = ref_arg(args).ok_or_else(|| need("<@ref>"))?;
             let uia = Uia::new()?;
             let v = match cmd {
-                "select" => act::select(&uia, ref_id)?,
-                "toggle" => act::toggle(&uia, ref_id)?,
-                "expand" => act::expand(&uia, ref_id, true)?,
-                _ => act::expand(&uia, ref_id, false)?,
+                "select" => act::select(&uia, &ref_id)?,
+                "toggle" => act::toggle(&uia, &ref_id)?,
+                "expand" => act::expand(&uia, &ref_id, true)?,
+                _ => act::expand(&uia, &ref_id, false)?,
             };
             Ok((cmd.into(), v))
         }
         "set" => {
             let r = args.positionals();
-            let ref_id = r.first().ok_or_else(|| need("<@ref> <value>"))?;
-            let value = r.get(1).ok_or_else(|| need("<@ref> <value>"))?;
+            let ref_id = ref_arg(args).ok_or_else(|| need("<@ref> <value>"))?;
+            let ref_is_positional = r.first().map(|s| s.starts_with('@')).unwrap_or(false);
+            let value = if ref_is_positional {
+                r.get(1)
+            } else {
+                r.first()
+            }
+            .ok_or_else(|| need("<@ref> <value>"))?;
             let uia = Uia::new()?;
-            Ok((cmd.into(), act::set_value(&uia, ref_id, value)?))
+            Ok((cmd.into(), act::set_value(&uia, &ref_id, value)?))
         }
         "key" => key_cmd(args),
         "type" => type_cmd(args),
@@ -440,10 +456,11 @@ fn dispatch(cmd: &str, args: &Args) -> Result<(String, Value)> {
                     .or(args.int("--amount")?)
                     .unwrap_or(-120) as i32,
             };
-            match r.first() {
+            let ref_id = ref_arg(args);
+            match ref_id {
                 Some(ref_id) if ref_id.starts_with('@') => {
                     let uia = Uia::new()?;
-                    Ok(("scroll".into(), act::scroll_ref(&uia, ref_id, delta)?))
+                    Ok(("scroll".into(), act::scroll_ref(&uia, &ref_id, delta)?))
                 }
                 _ => {
                     let hwnd = target_window(args)?;
@@ -500,6 +517,14 @@ fn typing_hwnd(hwnd: HWND) -> HWND {
 
 fn need(what: &str) -> DeskError {
     DeskError::new("BAD_ARGS", format!("缺少参数：{what}")).with_suggestion("desk help")
+}
+
+/// 元素引用：位置参数里的 @ref 优先，其次 --ref（两种写法命令都认）。
+fn ref_arg(args: &Args) -> Option<String> {
+    args.positionals()
+        .into_iter()
+        .find(|s| s.starts_with('@'))
+        .or_else(|| args.opt("--ref"))
 }
 
 pub fn state_dir() -> std::path::PathBuf {
@@ -778,19 +803,18 @@ fn click_cmd(args: &Args) -> Result<(String, Value)> {
             act::click_at(hwnd, x, y, input::Button::Left)?,
         ));
     }
-    let r = args.positionals();
-    let ref_id = r.first().ok_or_else(|| need("<@ref> 或 --xy X,Y"))?;
+    let ref_id = ref_arg(args).ok_or_else(|| need("<@ref> 或 --xy X,Y"))?;
     let mode = match args.opt("--mode") {
         Some(m) => Some(act::parse_mode(&m)?),
         None => None,
     };
     let uia = Uia::new()?;
-    let mut out = act::click(&uia, ref_id, mode)?;
+    let mut out = act::click(&uia, &ref_id, mode)?;
 
     if args.has("--verify") {
         // 定向验证：用同一个 ref 重新解析，读几个状态属性即可。
         std::thread::sleep(Duration::from_millis(120));
-        out["verify"] = match act::resolve(&uia, ref_id) {
+        out["verify"] = match act::resolve(&uia, &ref_id) {
             Ok(again) => json!({
                 "still_present": true,
                 "checked": uia.is_toggled(&again.element),
@@ -834,7 +858,8 @@ fn type_cmd(args: &Args) -> Result<(String, Value)> {
             };
             clipboard::set_text(text)?;
             let key_hwnd = typing_hwnd(hwnd);
-            let result = input::paste(key_hwnd);
+            let (result, stolen) =
+                input::with_foreground_guard(key_hwnd, || input::paste(key_hwnd));
             let restored = match &previous {
                 Some(prev) => clipboard::set_text(prev).is_ok(),
                 None => {
@@ -846,16 +871,17 @@ fn type_cmd(args: &Args) -> Result<(String, Value)> {
                 }
             };
             result?;
-            Ok((
-                "type".into(),
-                json!({
-                    "mode": "paste",
-                    "chars": text.chars().count(),
-                    "paste_confirmed": false,
-                    "clipboard_restored": restored,
-                    "clipboard_had_text": had_text,
-                }),
-            ))
+            let mut out = json!({
+                "mode": "paste",
+                "chars": text.chars().count(),
+                "paste_confirmed": false,
+                "clipboard_restored": restored,
+                "clipboard_had_text": had_text,
+            });
+            if stolen {
+                out["focus_restored"] = json!(true);
+            }
+            Ok(("type".into(), out))
         }
         "value" => {
             let ref_id = args
@@ -1048,6 +1074,13 @@ fn elevate_cmd(args: &Args) -> Result<Value> {
         DeskError::new("ELEVATE_FAILED", format!("提权结果解析失败：{e}")).delivered()
     })?;
     // 结果文件路径可预测且目录可写，至少要核对它确实是这条命令的输出。
+    if child_json.get("command").and_then(|v| v.as_str()) == Some("watchdog") {
+        return Err(DeskError::new(
+            "ELEVATE_TIMEOUT",
+            "提权子进程被看门狗终止（子命令没有返回）",
+        )
+        .delivered());
+    }
     if child_json.get("command").and_then(|v| v.as_str()) != Some(child.as_str()) {
         return Err(
             DeskError::new("ELEVATE_FAILED", "提权结果不属于这条命令，拒绝采用").delivered(),
@@ -1065,7 +1098,7 @@ fn elevate_cmd(args: &Args) -> Result<Value> {
 }
 
 fn guard_cmd(args: &Args) -> Result<Value> {
-    let secs = args.int("--seconds")?.unwrap_or(30).max(1) as u64;
+    let secs = args.int("--seconds")?.unwrap_or(30).clamp(1, 3600) as u64;
     let mut exe = args.opt("--exe");
     if exe.is_none()
         && let Some(w) = args.opt("--window")
@@ -1122,8 +1155,14 @@ fn guard_cmd(args: &Args) -> Result<Value> {
 }
 
 fn wait_cmd(args: &Args) -> Result<Value> {
-    let timeout = args.int("--timeout-ms")?.unwrap_or(10000).max(100) as u64;
+    let timeout = args
+        .int("--timeout-ms")?
+        .unwrap_or(10000)
+        .clamp(100, 600_000) as u64;
     if let Some(title) = args.opt("--title") {
+        if title.is_empty() {
+            return Err(DeskError::new("BAD_ARGS", "--title 不能是空串"));
+        }
         let exe = args.opt("--exe");
         let deadline = Instant::now() + Duration::from_millis(timeout);
         loop {
@@ -1152,6 +1191,12 @@ fn wait_cmd(args: &Args) -> Result<Value> {
     let hwnd = target_window(args)?;
     let text = args.opt("--text");
     let element = args.opt("--element").or(args.opt("--sel"));
+    if text.as_deref() == Some("") || element.as_deref() == Some("") {
+        return Err(DeskError::new(
+            "BAD_ARGS",
+            "--text/--element 不能是空串（空串会立即匹配一切）",
+        ));
+    }
     if text.is_none() && element.is_none() {
         return Err(need("--text 或 --element")
             .with_suggestion("desk wait --window w-1 --text 完成 --timeout-ms 5000"));
@@ -1404,6 +1449,7 @@ fn shot_cmd(args: &Args) -> Result<Value> {
     }
 
     let mut marks_out = Vec::new();
+    let mut marks_total = 0usize;
     let mut snapshot_id = Value::Null;
     if args.has("--marks") {
         if args.has("--screen") {
@@ -1454,6 +1500,10 @@ fn shot_cmd(args: &Args) -> Result<Value> {
                 if x < 0 || y < 0 {
                     continue;
                 }
+                marks_total += 1;
+                if marks.len() >= 60 {
+                    continue;
+                }
                 let n = marks.len() + 1;
                 marks.push(shot::Mark {
                     n,
@@ -1469,9 +1519,6 @@ fn shot_cmd(args: &Args) -> Result<Value> {
                     "name": e["name"],
                     "rect": {"x": x + ox, "y": y + oy, "w": w, "h": h},
                 }));
-                if marks.len() >= 60 {
-                    break;
-                }
             }
         }
         shot::draw_marks(&mut img, &marks);
@@ -1485,6 +1532,8 @@ fn shot_cmd(args: &Args) -> Result<Value> {
         "origin": {"x": img.origin_x, "y": img.origin_y},
         "blank": img.blank,
         "snapshot_id": snapshot_id,
+        "marks_total": marks_total,
+        "marks_truncated": marks_total > marks_out.len(),
         "marks": marks_out,
     }))
 }
@@ -1511,8 +1560,9 @@ fn window_action(cmd: &str, args: &Args) -> Result<Value> {
             Ok(value)
         }
         "restore" => {
+            // SW_SHOWNOACTIVATE 会取消最小化但不激活；SW_SHOWMINNOACTIVE 是 minimize 用的。
             unsafe {
-                let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             let minimized = unsafe { IsIconic(hwnd).as_bool() };
             let maximized = unsafe { IsZoomed(hwnd).as_bool() };
