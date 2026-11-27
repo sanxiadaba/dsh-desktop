@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::BOOL;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -58,45 +58,20 @@ pub fn window_id(hwnd: HWND) -> String {
     format!("w-{:x}", hwnd.0 as usize)
 }
 
-/// 本进程这次调用里真正执行过动作的窗口（用于判断前台变化是不是我们造成的）。
-/// 只读命令（snap/info/shot）不登记，否则用户主动点它也会被误判成"我们抢的"。
+/// 本进程这次调用里碰到过的窗口（用于判断前台变化是不是我们造成的）。
 static TOUCHED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 pub fn touched_windows() -> Vec<usize> {
     TOUCHED.lock().map(|v| v.clone()).unwrap_or_default()
 }
 
-pub fn touch(hwnd: HWND) {
-    if hwnd.0.is_null() {
-        return;
-    }
+fn remember(hwnd: HWND) {
     if let Ok(mut list) = TOUCHED.lock() {
         let v = hwnd.0 as usize;
         if !list.contains(&v) {
             list.push(v);
         }
     }
-}
-
-pub fn pid_of(hwnd: HWND) -> u32 {
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    pid
-}
-
-/// 我们碰过的窗口所属的进程（前台换成同进程的另一个窗口时也算我们造成的）。
-pub fn touched_processes() -> Vec<u32> {
-    touched_windows()
-        .into_iter()
-        .filter_map(|v| {
-            let hwnd = HWND(v as *mut _);
-            if unsafe { IsWindow(Some(hwnd)).as_bool() } {
-                Some(pid_of(hwnd))
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 pub fn parse_window_id(id: &str) -> Result<HWND> {
@@ -111,29 +86,25 @@ pub fn parse_window_id(id: &str) -> Result<HWND> {
         return Err(DeskError::new("WINDOW_GONE", format!("窗口已不存在：{id}"))
             .with_suggestion("重新运行 `desk windows` 取最新 id"));
     }
+    remember(hwnd);
     Ok(hwnd)
 }
 
-struct EnumCtx {
-    out: Vec<WindowInfo>,
-    include_invisible: bool,
-}
-
-pub fn enum_windows(include_invisible: bool) -> Vec<WindowInfo> {
-    let mut ctx = EnumCtx {
-        out: Vec::new(),
-        include_invisible,
-    };
+pub fn enum_windows() -> Vec<WindowInfo> {
+    let mut out: Vec<WindowInfo> = Vec::new();
     unsafe {
-        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut EnumCtx as isize));
+        let _ = EnumWindows(
+            Some(enum_proc),
+            LPARAM(&mut out as *mut Vec<WindowInfo> as isize),
+        );
     }
-    ctx.out
+    out
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = unsafe { &mut *(lparam.0 as *mut EnumCtx) };
-    if let Some(info) = unsafe { describe(hwnd, ctx.include_invisible) } {
-        ctx.out.push(info);
+    let out = unsafe { &mut *(lparam.0 as *mut Vec<WindowInfo>) };
+    if let Some(info) = unsafe { describe(hwnd, false) } {
+        out.push(info);
     }
     BOOL(1)
 }
@@ -257,7 +228,7 @@ pub fn window_rect(hwnd: HWND) -> Rect {
 /// 后台窗口的 UIA 元素不会报 focus，但线程的 hwndFocus 一直都在，
 /// 键盘消息必须投给它，投给顶层窗口 Win32 程序收不到。
 pub fn focus_hwnd(hwnd: HWND) -> Option<HWND> {
-    use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetAncestor, GetGUIThreadInfo};
+    use windows::Win32::UI::WindowsAndMessaging::{GUITHREADINFO, GetGUIThreadInfo};
     let tid = unsafe { GetWindowThreadProcessId(hwnd, None) };
     if tid == 0 {
         return None;
@@ -271,15 +242,7 @@ pub fn focus_hwnd(hwnd: HWND) -> Option<HWND> {
         return None;
     }
     let focus = gi.hwndFocus;
-    if focus.0.is_null() {
-        return None;
-    }
-    // 同一 UI 线程可能挂着多个顶层窗口：焦点控件必须属于目标窗口的根，
-    // 否则 type/key --window A 会把消息投到 B 里。
-    if unsafe { GetAncestor(focus, windows::Win32::UI::WindowsAndMessaging::GA_ROOT) } != hwnd {
-        return None;
-    }
-    Some(focus)
+    if focus.0.is_null() { None } else { Some(focus) }
 }
 
 /// 屏幕坐标 → 窗口客户区坐标。

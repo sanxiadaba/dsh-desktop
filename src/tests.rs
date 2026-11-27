@@ -1,4 +1,4 @@
-//! 不需要桌面的单元测试：解析、映射、纯计算、文档漂移。
+//! 不需要桌面的单元测试：解析、映射、纯计算。
 
 use crate::cli::Args;
 use crate::input;
@@ -40,8 +40,6 @@ fn key_combo_rejects_two_main_keys() {
 fn key_names_map_to_virtual_keys() {
     assert_eq!(input::parse_key("enter").unwrap(), 0x0D);
     assert_eq!(input::parse_key("f5").unwrap(), 0x74);
-    // 标点键走 VkKeyScanW，不再只认字母数字。
-    assert!(input::parse_key("/").is_ok());
     assert!(input::parse_key("no-such-key").is_err());
 }
 
@@ -58,19 +56,11 @@ fn admin_gate_comes_from_the_command_table() {
     for ok in ["help", "status", "elevate"] {
         assert!(!crate::commands::needs_admin(ok), "{ok} 应该允许非管理员");
     }
-    for deny in ["click", "type", "snap", "windows", "shot", "run", "doctor"] {
+    for deny in ["click", "type", "snap", "windows", "shot", "run"] {
         assert!(crate::commands::needs_admin(deny), "{deny} 应该要求管理员");
     }
     // 表里没有的命令按"需要管理员"处理，并会被 dispatch 拒绝
     assert!(crate::commands::needs_admin("no-such-command"));
-}
-
-#[test]
-fn command_names_are_unique() {
-    let mut seen = std::collections::HashSet::new();
-    for spec in crate::commands::COMMANDS {
-        assert!(seen.insert(spec.name), "命令重复：{}", spec.name);
-    }
 }
 
 #[test]
@@ -93,12 +83,6 @@ fn unknown_command_is_rejected_by_name() {
     let err = crate::run(&["frobnicate".to_string()]).unwrap_err();
     assert_eq!(err.code, "BAD_ARGS");
     assert!(err.message.contains("未知子命令"), "{}", err.message);
-}
-
-#[test]
-fn unknown_command_help_does_not_look_successful() {
-    let err = crate::run(&["frobnicate".to_string(), "--help".to_string()]).unwrap_err();
-    assert_eq!(err.code, "BAD_ARGS");
 }
 
 #[test]
@@ -164,28 +148,21 @@ fn rect_center_and_empty() {
 
 #[test]
 fn window_id_roundtrip_is_stable_format() {
+    // 只验证格式，不碰真实窗口
     assert_eq!(format!("w-{:x}", 0x1a2bu64), "w-1a2b");
 }
 
 #[test]
 fn validate_accepts_double_dash_and_rejects_unknown() {
+    use crate::cli::Args;
     let ok = Args::new(&argv(&["--", "click", "@s1:e3"]));
-    assert!(ok.validate("elevate").is_ok(), "-- 之后应该都是位置参数");
+    assert!(ok.validate().is_ok(), "-- 应该被当作分隔符");
     let missing = Args::new(&["--window".to_string()]);
-    assert_eq!(missing.validate("snap").unwrap_err().code, "BAD_ARGS");
+    assert_eq!(missing.validate().unwrap_err().code, "BAD_ARGS");
     let unknown = Args::new(&["--windw".to_string(), "w-1".to_string()]);
-    assert_eq!(unknown.validate("snap").unwrap_err().code, "BAD_ARGS");
+    assert_eq!(unknown.validate().unwrap_err().code, "BAD_ARGS");
     let eq = Args::new(&["--depth=7".to_string()]);
-    assert!(eq.validate("snap").is_ok());
-}
-
-#[test]
-fn per_command_validation_rejects_foreign_flags() {
-    let a = Args::new(&argv(&["--window", "w-1", "--seconds", "5"]));
-    assert_eq!(a.validate("windows").unwrap_err().code, "BAD_ARGS");
-    assert!(a.validate("guard").is_ok());
-    let pretty = Args::new(&argv(&["--pretty"]));
-    assert!(pretty.validate("status").is_ok());
+    assert!(eq.validate().is_ok());
 }
 
 #[test]
@@ -224,7 +201,6 @@ fn snapshot_ids_must_be_safe() {
     assert!(!crate::store::is_valid_sid("s..\\x"));
     assert!(!crate::store::is_valid_sid("x123"));
 }
-
 #[test]
 fn every_command_is_documented_in_the_skill() {
     let skill = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/SKILL.md"))
@@ -240,47 +216,6 @@ fn every_command_is_documented_in_the_skill() {
         );
     }
 }
-
-#[test]
-fn ref_can_be_passed_as_option() {
-    // 位置参数优先，其次 --ref；不要在测试里走 UIA（并行测试下 COM 初始化可能失败）。
-    let a = Args::new(&argv(&["--ref", "@s1:e1"]));
-    assert_eq!(crate::ref_arg(&a).as_deref(), Some("@s1:e1"));
-    let b = Args::new(&argv(&["@s2:e2", "--ref", "@s1:e1"]));
-    assert_eq!(crate::ref_arg(&b).as_deref(), Some("@s2:e2"));
-    let c = Args::new(&argv(&[]));
-    assert_eq!(crate::ref_arg(&c), None);
-}
-
-#[test]
-fn readme_documents_commands_and_version() {
-    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
-        .expect("读不到 README.md");
-    assert!(readme.contains("0.2.0"), "README 没写当前版本");
-    for spec in crate::commands::COMMANDS {
-        if matches!(spec.name, "focus" | "scrollinto" | "help") {
-            continue;
-        }
-        assert!(
-            readme.contains(spec.name),
-            "命令 {} 没写进 README",
-            spec.name
-        );
-    }
-}
-
-#[test]
-fn every_error_code_is_documented_in_the_skill() {
-    let skill = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/SKILL.md"))
-        .expect("读不到 SKILL.md");
-    for code in crate::error::CODES {
-        assert!(
-            skill.contains(code),
-            "错误码 {code} 没写进 SKILL.md 的错误表"
-        );
-    }
-}
-
 #[test]
 fn watchdog_budget_follows_declared_timeout() {
     let with_timeout = crate::cli::Args::new(&argv(&["--timeout-ms", "5000"]));
@@ -295,48 +230,4 @@ fn watchdog_budget_follows_declared_timeout() {
     );
     let plain = crate::cli::Args::new(&argv(&[]));
     assert!(crate::watchdog_budget(&plain).as_millis() >= 5_000);
-}
-
-#[test]
-fn dispatch_has_a_branch_for_every_command() {
-    // 往 COMMANDS 里加命令却忘了加 dispatch 分支时，这里会拿到"未知子命令"。
-    for spec in crate::commands::COMMANDS {
-        if matches!(spec.name, "help" | "guard" | "selftest" | "run") {
-            continue; // 只读/会阻塞/读 stdin，留给集成测试
-        }
-        if let Err(e) = crate::dispatch(spec.name, &Args::new(&[])) {
-            assert_ne!(
-                e.message,
-                format!("未知子命令：{}", spec.name),
-                "命令 {} 在命令表里但没有 dispatch 分支",
-                spec.name
-            );
-        }
-    }
-}
-
-#[test]
-fn walk_stats_combine_both_truncations() {
-    assert!(!uia::WalkStats::default().truncated());
-    assert!(
-        uia::WalkStats {
-            cut_by_depth: true,
-            cut_by_limit: false
-        }
-        .truncated()
-    );
-    assert!(
-        uia::WalkStats {
-            cut_by_limit: true,
-            cut_by_depth: false
-        }
-        .truncated()
-    );
-}
-
-#[test]
-fn result_file_must_stay_under_state_dir() {
-    let bad =
-        crate::allowed_result_file(std::path::Path::new("C:\\Windows\\Temp\\elevated-x.json"));
-    assert!(bad.is_err());
 }

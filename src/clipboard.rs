@@ -8,9 +8,7 @@ use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
-};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
 fn to_wide(text: &str) -> Vec<u16> {
@@ -70,8 +68,6 @@ pub fn has_text() -> bool {
 }
 
 pub fn get_text() -> Result<String> {
-    // 上限 4 MB 字符（8 MB UTF-16）：剪贴板是别的进程能写的，不能按"扫到 NUL"无限读。
-    const MAX_CHARS: usize = 4 * 1024 * 1024;
     unsafe {
         OpenClipboard(None)
             .map_err(|e| DeskError::new("CLIPBOARD_FAILED", format!("打开剪贴板失败：{e}")))?;
@@ -81,36 +77,19 @@ pub fn get_text() -> Result<String> {
                 let hg = HGLOBAL(h.0);
                 let p = GlobalLock(hg) as *const u16;
                 if p.is_null() {
-                    let _ = CloseClipboard();
-                    return Err(DeskError::new("CLIPBOARD_FAILED", "锁定剪贴板内存失败"));
+                    String::new()
+                } else {
+                    let mut len = 0usize;
+                    while *p.add(len) != 0 {
+                        len += 1;
+                    }
+                    let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+                    let _ = GlobalUnlock(hg);
+                    s
                 }
-                let size = GlobalSize(hg);
-                let max_chars = (size as usize / 2).min(MAX_CHARS);
-                let mut len = 0usize;
-                while len < max_chars && *p.add(len) != 0 {
-                    len += 1;
-                }
-                let terminated = len < max_chars || (max_chars > 0 && *p.add(max_chars - 1) == 0);
-                let _ = GlobalUnlock(hg);
-                if !terminated {
-                    let _ = CloseClipboard();
-                    return Err(DeskError::new(
-                        "CLIPBOARD_TOO_LARGE",
-                        format!(
-                            "剪贴板文本没有在 {} 字符内结束，拒绝继续读（可能是异常 owner）",
-                            MAX_CHARS
-                        ),
-                    ));
-                }
-                String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
             }
-            Err(_) => {
-                let _ = CloseClipboard();
-                return Err(DeskError::new(
-                    "NO_TEXT",
-                    "剪贴板里没有文本（可能是图片/文件，或刚被别的程序换掉）",
-                ));
-            }
+            // 剪贴板里没有文本，不等于出错
+            Err(_) => String::new(),
         };
         let _ = CloseClipboard();
         Ok(out)

@@ -8,14 +8,14 @@
 
 use crate::error::{DeskError, Result};
 use crate::win::screen_to_client;
-use windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, HWND, LPARAM, SetLastError, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MAPVK_VK_TO_VSC, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, GCL_STYLE, GetClassLongPtrW, PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
-    SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 const TIMEOUT_MS: u32 = 2000;
@@ -41,9 +41,6 @@ fn check_xy(x: i32, y: i32) -> Result<()> {
 
 fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: LPARAM) -> bool {
     let mut out: usize = 0;
-    // SendMessageTimeout 的返回值是窗口过程的 LRESULT，0 是合法结果；
-    // 真正的失败/超时看 GetLastError。先把 last error 清零，避免读到上一次的残留。
-    unsafe { SetLastError(ERROR_SUCCESS) };
     let ok = unsafe {
         SendMessageTimeoutW(
             hwnd,
@@ -55,10 +52,7 @@ fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: LPARAM) -> bool {
             Some(&mut out as *mut usize),
         )
     };
-    if ok.0 != 0 {
-        return true;
-    }
-    unsafe { GetLastError() == ERROR_SUCCESS }
+    ok.0 != 0
 }
 
 pub fn post(hwnd: HWND, msg: u32, wparam: usize, lparam: LPARAM) -> bool {
@@ -77,34 +71,22 @@ pub fn click_screen(hwnd: HWND, sx: i32, sy: i32, button: Button) -> Result<()> 
 /// 有些程序（Qt 尤其）收到点击会自己 SetActiveWindow，把窗口顶到最前。
 /// 这里在动作前后对比前台窗口，一旦被换走就立刻还回原来的前台。
 /// 返回 (动作结果, 是否发生过抢占)。
-pub fn with_foreground_guard<T>(hwnd: HWND, f: impl FnOnce() -> T) -> (T, bool) {
+pub fn with_foreground_guard<T>(f: impl FnOnce() -> T) -> (T, bool) {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
     let before = unsafe { GetForegroundWindow() };
     let out = f();
     let after = unsafe { GetForegroundWindow() };
-    if before == after || before.0.is_null() {
-        return (out, false);
+    if before != after && !before.0.is_null() {
+        unsafe {
+            let _ = SetForegroundWindow(before);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let now = unsafe { GetForegroundWindow() };
+        if now == before {
+            return (out, true);
+        }
     }
-    // 只有"新前台属于目标进程"才判定为被目标抢走。用户在动作期间自己切到别的
-    // 程序（前台 pid 与目标无关）时不能把他拽回去。
-    let target_pid = unsafe {
-        let mut pid = 0u32;
-        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        pid
-    };
-    let after_pid = unsafe {
-        let mut pid = 0u32;
-        windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(after, Some(&mut pid));
-        pid
-    };
-    if after_pid == 0 || after_pid != target_pid {
-        return (out, false);
-    }
-    unsafe {
-        let _ = SetForegroundWindow(before);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(30));
-    (out, unsafe { GetForegroundWindow() == before })
+    (out, false)
 }
 
 /// 坐标下面真正该收消息的那个 HWND。
@@ -165,7 +147,6 @@ pub enum Button {
 
 /// 滚轮：`delta` 正数向上，负数向下（一格 120）。
 pub fn wheel_screen(hwnd: HWND, sx: i32, sy: i32, delta: i32) -> Result<()> {
-    check_xy(sx, sy)?;
     // 滚轮必须投给坐标下最深的子窗口：WM_MOUSEWHEEL 不会被子控件收到，
     // 投给顶层窗口时列表/编辑框会"滚不动"。
     let hwnd = deepest_child(hwnd, sx, sy);
@@ -211,35 +192,30 @@ pub fn key_combo(hwnd: HWND, combo: &str) -> Result<()> {
         (WM_KEYDOWN, WM_KEYUP)
     };
     let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as usize;
-    // 方向键/编辑键的真实输入带扩展位，缺了它有些控件会按小键盘解释。
-    let ext = if is_extended(vk) { 0x0100_0000usize } else { 0 };
 
     // 用 Post 而不是 Send：消息进目标线程队列，让它的消息循环还有机会跑
     // TranslateAccelerator / IsDialogMessage；Send 会直接调用窗口过程，绕开这些。
-    // 注意：修饰键的"按下状态"不在目标线程里，所以带修饰键的快捷键只保证投递，
-    // 不保证目标按真实键盘状态解释——这一点在返回的 effective 里如实标注。
     let mut ok = true;
     for m in &mods {
-        // 修饰键本身永远走普通 KEYDOWN，WM_SYSKEYDOWN 只给带 Alt 的主键。
-        ok &= post(hwnd, WM_KEYDOWN, m.0 as usize, LPARAM(0x0001_0001));
+        ok &= post(hwnd, down_msg, m.0 as usize, LPARAM(0x0001_0001));
     }
     ok &= post(
         hwnd,
         down_msg,
         vk as usize,
-        LPARAM((0x0001 | (scan << 16) | ext) as isize),
+        LPARAM((0x0001 | (scan << 16)) as isize),
     );
     std::thread::sleep(std::time::Duration::from_millis(20));
     ok &= post(
         hwnd,
         up_msg,
         vk as usize,
-        LPARAM((0x0001 | (scan << 16) | ext | 0xC000_0000u32 as usize) as isize),
+        LPARAM((0x0001 | (scan << 16) | 0xC000_0000u32 as usize) as isize),
     );
     for m in mods.iter().rev() {
         ok &= post(
             hwnd,
-            WM_KEYUP,
+            up_msg,
             m.0 as usize,
             LPARAM((0x0001_0001 | 0xC000_0000u32 as usize) as isize),
         );
@@ -254,15 +230,8 @@ pub fn key_combo(hwnd: HWND, combo: &str) -> Result<()> {
     Ok(())
 }
 
-fn is_extended(vk: u16) -> bool {
-    matches!(
-        vk,
-        0x21 | 0x22 | 0x23 | 0x24 | 0x25 | 0x26 | 0x27 | 0x28 | 0x2D | 0x2E | 0x6F | 0x90
-    )
-}
-
 /// 屏幕坐标双击：投给该点下最深的子窗口（与点击一致）。
-pub fn double_click_screen(hwnd: HWND, sx: i32, sy: i32) -> Result<bool> {
+pub fn double_click_screen(hwnd: HWND, sx: i32, sy: i32) -> Result<()> {
     let target = deepest_child(hwnd, sx, sy);
     let (cx, cy) = screen_to_client(target, sx, sy);
     double_click_client(target, cx, cy)
@@ -277,10 +246,7 @@ pub fn drag_screen(hwnd: HWND, from: (i32, i32), to: (i32, i32), steps: u32) -> 
 }
 
 /// 双击：系统平时靠真实输入生成 WM_LBUTTONDBLCLK，投递时得自己补上。
-///
-/// 目标窗口类没注册 CS_DBLCLKS 时，系统不会把两条按下当双击；这时补第二次
-/// down/up 作为退路，并返回 true 表示"是模拟双击"。
-pub fn double_click_client(hwnd: HWND, cx: i32, cy: i32) -> Result<bool> {
+pub fn double_click_client(hwnd: HWND, cx: i32, cy: i32) -> Result<()> {
     const WM_LBUTTONDBLCLK: u32 = 0x0203;
     let lp = lparam_xy(cx, cy);
     let _ = send(hwnd, WM_MOUSEMOVE, 0, lp);
@@ -289,38 +255,21 @@ pub fn double_click_client(hwnd: HWND, cx: i32, cy: i32) -> Result<bool> {
     }
     let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
     std::thread::sleep(std::time::Duration::from_millis(40));
-    // 窗口类没注册 CS_DBLCLKS 时，系统不会把两条按下当双击；DBLCLK 消息也会被
-    // DefWindowProc 直接吞掉。这时补第二次完整点击作为退路，并返回 emulated=true。
-    if has_dblclks(hwnd) {
-        let _ = send(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lp);
-        let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
-        return Ok(false);
+    if !send(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, lp) {
+        return Err(DeskError::new("BG_DELIVER_FAILED", "双击：DBLCLK 消息投递失败").delivered());
     }
-    let _ = send(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp);
     let _ = send(hwnd, WM_LBUTTONUP, 0, lp);
-    Ok(true)
+    Ok(())
 }
 
-fn has_dblclks(hwnd: HWND) -> bool {
-    let style = unsafe { GetClassLongPtrW(hwnd, GCL_STYLE) } as u32;
-    style & CS_DBLCLKS.0 != 0
-}
-
-/// 把剪贴板内容粘贴到目标窗口。
-///
-/// 只发 WM_PASTE：以前失败后回退 ctrl+v，但 Ctrl 状态投递不到目标线程，
-/// 实际效果是往焦点控件里插入一个 "v"，比失败更糟。
+/// 把剪贴板内容粘贴到目标窗口：优先 WM_PASTE，不行再发 Ctrl+V。
+/// 中文优先用 WM_CHAR（`type` 默认路径），它绕过输入法；这条只在目标不认 WM_CHAR 时用。
 pub fn paste(hwnd: HWND) -> Result<()> {
     const WM_PASTE: u32 = 0x0302;
     if send(hwnd, WM_PASTE, 0, LPARAM(0)) {
-        Ok(())
-    } else {
-        Err(
-            DeskError::new("PASTE_FAILED", "WM_PASTE 投递失败，目标窗口没有接收消息")
-                .with_suggestion("改用 `type --method value` 直接写值，或先确认目标窗口没挂起")
-                .delivered(),
-        )
+        return Ok(());
     }
+    key_combo(hwnd, "ctrl+v")
 }
 /// 逐字符投递 WM_CHAR。ASCII 和大部分 BMP 字符可用；中文输入法文本建议走粘贴。
 pub fn type_text(hwnd: HWND, text: &str) -> Result<()> {
@@ -393,17 +342,7 @@ pub fn parse_key(name: &str) -> Result<u16> {
                     if up.is_ascii_alphanumeric() {
                         up as u16
                     } else {
-                        // 标点/符号键：交给 VkKeyScanW（低字节是 VK，高位是 shift 状态）。
-                        let scan = unsafe {
-                            windows::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW(c as u16)
-                        };
-                        if scan == -1 {
-                            return Err(DeskError::new(
-                                "BAD_ARGS",
-                                format!("不认识的按键：{name}"),
-                            ));
-                        }
-                        (scan as u16) & 0xff
+                        return Err(DeskError::new("BAD_ARGS", format!("不认识的按键：{name}")));
                     }
                 }
                 _ => return Err(DeskError::new("BAD_ARGS", format!("不认识的按键：{name}"))),

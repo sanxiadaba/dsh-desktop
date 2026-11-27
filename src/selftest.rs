@@ -11,10 +11,10 @@ use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GetMessageW, MSG, PostMessageW, RegisterClassW, TranslateMessage, WM_CHAR,
-    WM_CLOSE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT,
-    WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetMessageW, MSG, PostMessageW, RegisterClassW, TranslateMessage, WM_CHAR, WM_CLOSE,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSW,
+    WS_CHILD, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 struct Counters {
@@ -123,9 +123,7 @@ pub fn run() -> Result<Value> {
         let class_name = windows::core::HSTRING::from("DeskSelftestWindow");
         let child_class = windows::core::HSTRING::from("DeskSelftestChild");
         let cwc = WNDCLASSW {
-            // 子窗口要模拟一个"支持双击"的真实控件：没有 CS_DBLCLKS 时系统不会
-            // 把两条按下当双击，has_dblclks 会走两次点击的退路。
-            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(child_wndproc),
             hInstance: hinst,
             lpszClassName: windows::core::PCWSTR(child_class.as_ptr()),
@@ -303,7 +301,7 @@ pub fn run() -> Result<Value> {
 
     // 5) 窗口枚举能看到它。
     let id = win::window_id(hwnd);
-    let found = win::enum_windows(false).into_iter().any(|w| w.id == id);
+    let found = win::enum_windows().into_iter().any(|w| w.id == id);
     check("windows_enum", "found", format!("id={id}"), found);
 
     // 6) 截图非空。
